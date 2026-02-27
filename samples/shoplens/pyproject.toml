@@ -1,0 +1,18 @@
+[project]
+name = "shoplens"
+version = "0.1.0"
+description = "Sample e-commerce AI photography platform powered by Evalytic"
+requires-python = ">=3.11"
+dependencies = [
+    "fal-client>=0.5.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+evalytic = ["evalytic"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
