@@ -1,6 +1,6 @@
 # Evalytic
 
-**Pytest for images.** Automated quality evaluation for AI-generated visuals.
+**Evals for visual AI.** Automated quality evaluation for AI-generated visuals.
 
 [![PyPI](https://img.shields.io/pypi/v/evalytic)](https://pypi.org/project/evalytic/)
 [![Python](https://img.shields.io/pypi/pyversions/evalytic)](https://pypi.org/project/evalytic/)
