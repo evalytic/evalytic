@@ -19,7 +19,7 @@ evaly bench \
 
 ## What It Does
 
-Evalytic benchmarks AI image generation models by generating images, scoring them with VLM judges (Gemini, GPT-4o, Claude, Ollama), and producing rich reports — all in one command.
+Evalytic benchmarks AI image generation models by generating images, scoring them with VLM judges (Gemini, GPT-5, Claude, Ollama), and producing rich reports — all in one command.
 
 - **Model Selection** — Compare Flux Schnell vs Dev vs Pro with real prompts
 - **Prompt Optimization** — Measure how well models follow your prompts
@@ -73,7 +73,7 @@ Any VLM that can analyze images works as a judge:
 
 ```bash
 evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash     # Default (free)
-evaly bench -m flux-schnell -p "A cat" -j openai/gpt-4o        # OpenAI
+evaly bench -m flux-schnell -p "A cat" -j openai/gpt-5.2       # OpenAI
 evaly bench -m flux-schnell -p "A cat" -j anthropic/claude-sonnet-4  # Anthropic
 evaly bench -m flux-schnell -p "A cat" -j ollama/qwen2.5-vl:7b # Local
 ```
