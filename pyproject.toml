@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evalytic"
+version = "0.2.1"
+description = "Visual Generation Quality Evaluation SDK"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Evalytic", email = "hello@evalytic.dev" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Typing :: Typed",
+]
+keywords = ["ai", "evaluation", "image", "video", "vlm", "quality"]
+dependencies = [
+    "httpx>=0.27.0",
+    "click>=8.0",
+    "rich>=13.0",
+    "python-dotenv>=1.0.0",
+    "Jinja2>=3.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+generation = [
+    "fal-client>=0.5.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+metrics = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "lpips>=0.1.4",
+    "insightface>=0.7",
+    "onnxruntime>=1.16",
+]
+all = [
+    "evalytic[generation]",
+    "evalytic[metrics]",
+]
+
+[project.scripts]
+evalytic = "evalytic.cli.main:cli"
+evaly = "evalytic.cli.main:cli"
+
+[project.urls]
+Homepage = "https://evalytic.dev"
+Documentation = "https://docs.evalytic.dev"
+Repository = "https://github.com/evalytic/evalytic"
+Issues = "https://github.com/evalytic/evalytic/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["evalytic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
