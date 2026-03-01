@@ -1,8 +1,8 @@
 """VLM judge -- scores images using structured prompts.
 
 Supports multiple providers via a single Judge class:
-  - Gemini (default): gemini-3-flash, gemini-3.1-pro, gemini-2.5-flash, gemini-2.5-pro
-  - OpenAI: gpt-5.2, gpt-4o, gpt-4o-mini, o4-mini
+  - Gemini (default): gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash, gemini-3.1-pro
+  - OpenAI: gpt-5.2, o4-mini
   - Anthropic: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5
   - Self-hosted: ollama/qwen3-vl, ollama/internvl3, lmstudio/*, local/*
 
@@ -30,7 +30,7 @@ from ..exceptions import JudgeError, ValidationError
 from .types import DimensionResult
 
 # ---------------------------------------------------------------------------
-# System prompt for VLM judge
+# System prompt -- identical to infra/lambda/judge/prompts/shared.py
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
@@ -43,7 +43,7 @@ SYSTEM_PROMPT = (
 )
 
 # ---------------------------------------------------------------------------
-# Dimension prompts
+# Dimension prompts -- verbatim from infra/lambda/judge/prompts/
 # ---------------------------------------------------------------------------
 
 VISUAL_QUALITY_PROMPT = """Evaluate the VISUAL QUALITY of this AI-generated image.
@@ -292,8 +292,6 @@ RECOMMENDED_JUDGES: dict[str, list[str]] = {
     ],
     "openai": [
         "gpt-5.2",             # Best accuracy — MMMU-Pro 86.5%, $1.75/M input
-        "gpt-4o",              # Proven — $2.50/M input
-        "gpt-4o-mini",         # Ultra-budget — $0.15/M input
         "o4-mini",             # Reasoning — $1.10/M input
     ],
     "anthropic": [

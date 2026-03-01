@@ -27,6 +27,8 @@ from evalytic.bench.registry import (
     UnknownModelError,
     _SCHEMA_CACHE,
     _USER_OVERRIDES,
+    _COST_CACHE,
+    detect_cost,
     detect_image_field,
     estimate_cost,
     list_models,
@@ -183,7 +185,7 @@ class TestBenchReport:
     def test_to_dict(self) -> None:
         report = self._make_report()
         d = report.to_dict()
-        assert d["$schema"] == "https://evalytic.dev/schemas/bench-report-v1.json"
+        assert d["$schema"] == "https://evalytic.ai/schemas/bench-report-v1.json"
         assert d["name"] == "test-bench"
         assert d["winner"] == "flux-pro"
         assert len(d["ranking"]) == 2
@@ -321,6 +323,52 @@ class TestSchemaDetection:
         result = _build_generation_items(items, entry, "img2img", None, None, None)
         assert result[0]["arguments"]["image_url"] == "https://example.com/img.jpg"
         assert "image_urls" not in result[0]["arguments"]
+
+
+# -----------------------------------------------------------------------
+# bench/registry.py -- cost detection
+# -----------------------------------------------------------------------
+
+
+class TestCostDetection:
+    def test_detect_cost_cached(self) -> None:
+        """Cache hit returns cached value."""
+        _COST_CACHE["fal-ai/test-cost-cached"] = 0.042
+        try:
+            assert detect_cost("fal-ai/test-cost-cached") == 0.042
+        finally:
+            _COST_CACHE.pop("fal-ai/test-cost-cached", None)
+
+    def test_detect_cost_cached_none(self) -> None:
+        """Cache stores None for previously failed lookups."""
+        _COST_CACHE["fal-ai/test-cost-none"] = None
+        try:
+            assert detect_cost("fal-ai/test-cost-none") is None
+        finally:
+            _COST_CACHE.pop("fal-ai/test-cost-none", None)
+
+    def test_detect_cost_fallback_default(self) -> None:
+        """Scrape failure falls back to registry_default."""
+        _COST_CACHE.pop("nonexistent/cost-model", None)
+        result = detect_cost("nonexistent/cost-model", registry_default=0.05)
+        assert result == 0.05
+
+    def test_detect_cost_fallback_none(self) -> None:
+        """Scrape failure with no default returns None."""
+        _COST_CACHE.pop("nonexistent/cost-model2", None)
+        result = detect_cost("nonexistent/cost-model2")
+        assert result is None
+
+    def test_register_model_overrides_cost(self) -> None:
+        """register_model cost takes priority over any auto-detect."""
+        register_model("test-cost-override", endpoint="fal-ai/test-co", cost_per_image=0.099)
+        try:
+            entry = resolve_model("test-cost-override")
+            assert entry.cost_per_image == 0.099
+            assert "test-cost-override" in _USER_OVERRIDES
+        finally:
+            MODEL_REGISTRY.pop("test-cost-override", None)
+            _USER_OVERRIDES.discard("test-cost-override")
 
 
 # -----------------------------------------------------------------------
@@ -1033,7 +1081,7 @@ class TestPublicApi:
         import evalytic
 
         assert callable(evalytic.bench)
-        assert evalytic.__version__ == "0.3.0"
+        assert evalytic.__version__ == "0.3.1"
 
 
 # -----------------------------------------------------------------------
@@ -1053,7 +1101,7 @@ class TestBareEvalytic:
         assert "evalytic bench" in result.output
         assert "FAL_KEY" in result.output
         assert "GEMINI_API_KEY" in result.output
-        assert "evalytic.dev" in result.output
+        assert "evalytic.ai" in result.output
 
     def test_help_still_works(self) -> None:
         from click.testing import CliRunner

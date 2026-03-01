@@ -18,7 +18,7 @@ from .consensus import ConsensusJudge
 from .cost import build_cost_breakdown
 from .generator import GenerationResult, generate_single
 from .judge import DIMENSION_CONFIG, Judge
-from .registry import ModelEntry, _USER_OVERRIDES, detect_image_field, resolve_model
+from .registry import ModelEntry, _USER_OVERRIDES, detect_cost, detect_image_field, resolve_model
 from .types import (
     BenchItem,
     BenchReport,
@@ -135,27 +135,37 @@ def run_bench(
         # Resolve models
         entries = [resolve_model(m) for m in models]
 
-        # Auto-detect image field for img2img models via fal.ai schema API.
+        # Auto-detect image field and cost for models via fal.ai.
         # Skip models that the user explicitly configured via register_model().
-        if pipeline == "img2img":
-            updated: list[ModelEntry] = []
-            for entry in entries:
-                if entry.short_name in _USER_OVERRIDES:
-                    updated.append(entry)
-                    continue
-                detected = detect_image_field(
+        updated: list[ModelEntry] = []
+        for entry in entries:
+            if entry.short_name in _USER_OVERRIDES:
+                updated.append(entry)
+                continue
+            changes: dict[str, object] = {}
+            # Image field detection (img2img only)
+            if pipeline == "img2img":
+                detected_field = detect_image_field(
                     entry.endpoint, registry_default=entry.image_field
                 )
-                if detected != entry.image_field:
-                    entry = ModelEntry(
-                        short_name=entry.short_name,
-                        endpoint=entry.endpoint,
-                        pipeline=entry.pipeline,
-                        cost_per_image=entry.cost_per_image,
-                        image_field=detected,
-                    )
-                updated.append(entry)
-            entries = updated
+                if detected_field != entry.image_field:
+                    changes["image_field"] = detected_field
+            # Cost detection (all pipelines)
+            detected_cost = detect_cost(
+                entry.endpoint, registry_default=entry.cost_per_image
+            )
+            if detected_cost is not None and detected_cost != entry.cost_per_image:
+                changes["cost_per_image"] = detected_cost
+            if changes:
+                entry = ModelEntry(
+                    short_name=entry.short_name,
+                    endpoint=entry.endpoint,
+                    pipeline=entry.pipeline,
+                    cost_per_image=changes.get("cost_per_image", entry.cost_per_image),  # type: ignore[arg-type]
+                    image_field=changes.get("image_field", entry.image_field),  # type: ignore[arg-type]
+                )
+            updated.append(entry)
+        entries = updated
 
         _log(f"Models: {[e.short_name for e in entries]}")
 

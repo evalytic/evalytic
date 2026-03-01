@@ -1,33 +1,29 @@
-"""Evalytic -- Visual Generation Quality Evaluation SDK.
+"""Evalytic -- Evals for visual AI.
 
-Quick start:
+Quick start (CLI):
+
+    $ pip install evalytic
+    $ export FAL_KEY=... GEMINI_API_KEY=...
+
+    # Benchmark 3 models, get HTML report
+    $ evaly bench -m flux-schnell -m flux-dev -m flux-pro \\
+        -p "A cat on a windowsill" -o report.html --yes
+
+    # Score a single image
+    $ evaly eval --image output.png --prompt "A sunset over mountains"
+
+Python API:
 
     import evalytic
 
-    evalytic.init(api_key="ek-...")
-
-    # Single image evaluation
     result = evalytic.eval_image(
         image="https://example.com/output.png",
         prompt="A cat wearing a top hat",
     )
     print(result.display_score)  # "3.8/5"
-
-    # Full experiment with a dataset
-    ds = evalytic.init_dataset("my-project", "hero-prompts")
-    ds.insert({"prompt": "A cat in a top hat"})
-    ds.insert({"prompt": "Sunset over Tokyo"})
-
-    experiment = evalytic.Eval(
-        project="my-project",
-        data=ds,
-        scores=["visual_quality", "prompt_adherence"],
-        model="dall-e-3",
-    )
-    print(experiment.summary)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .client import _get_client, init
 from .compare import compare

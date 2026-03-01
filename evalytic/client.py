@@ -17,7 +17,7 @@ import httpx
 # Global configuration
 # ---------------------------------------------------------------------------
 
-_DEFAULT_API_URL = "https://api.evalytic.dev"
+_DEFAULT_API_URL = "https://api.evalytic.ai"
 _DEFAULT_TIMEOUT = 30.0
 
 

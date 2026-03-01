@@ -5,7 +5,8 @@ from __future__ import annotations
 import difflib
 import logging
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 
 from ..exceptions import ValidationError
 
@@ -47,28 +48,28 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     # text2img
     "flux-schnell": ModelEntry("flux-schnell", "fal-ai/flux/schnell", "text2img", 0.003),
     "flux-dev": ModelEntry("flux-dev", "fal-ai/flux/dev", "text2img", 0.025),
-    "flux-pro": ModelEntry("flux-pro", "fal-ai/flux-pro/v1.1", "text2img", 0.05),
+    "flux-pro": ModelEntry("flux-pro", "fal-ai/flux-pro/v1.1", "text2img", 0.04),
     "flux-2-dev": ModelEntry("flux-2-dev", "fal-ai/flux-2/dev", "text2img", 0.025),
     "flux-2-pro": ModelEntry("flux-2-pro", "fal-ai/flux-2/pro", "text2img", 0.05),
     "sdxl": ModelEntry("sdxl", "fal-ai/fast-sdxl", "text2img", 0.01),
-    "sd3": ModelEntry("sd3", "fal-ai/stable-diffusion-v3-medium", "text2img", 0.03),
+    "sd3": ModelEntry("sd3", "fal-ai/stable-diffusion-v3-medium", "text2img", 0.035),
     "recraft-v3": ModelEntry("recraft-v3", "fal-ai/recraft-v3", "text2img", 0.04),
-    "imagen-3": ModelEntry("imagen-3", "fal-ai/imagen3", "text2img", 0.04),
-    "ideogram-v3": ModelEntry("ideogram-v3", "fal-ai/ideogram/v3", "text2img", 0.08),
+    "imagen-3": ModelEntry("imagen-3", "fal-ai/imagen3", "text2img", 0.05),
+    "ideogram-v3": ModelEntry("ideogram-v3", "fal-ai/ideogram/v3", "text2img", 0.03),
     "nano-banana-pro": ModelEntry("nano-banana-pro", "fal-ai/nano-banana-pro", "text2img", 0.15),
     "recraft-v4-pro": ModelEntry("recraft-v4-pro", "fal-ai/recraft/v4/pro/text-to-image", "text2img", 0.25),
     "grok-imagine": ModelEntry("grok-imagine", "xai/grok-imagine-image", "text2img", 0.02),
     "flux-2-flex": ModelEntry("flux-2-flex", "fal-ai/flux-2-flex", "text2img", 0.05),
     "hidream": ModelEntry("hidream", "fal-ai/hidream-i1-full", "text2img", 0.05),
-    "seedream": ModelEntry("seedream", "fal-ai/bytedance/seedream/v5/lite/text-to-image", "text2img", 0.03),
-    "imagineart": ModelEntry("imagineart", "imagineart/imagineart-1.5-preview/text-to-image", "text2img", 0.04),
+    "seedream": ModelEntry("seedream", "fal-ai/bytedance/seedream/v5/lite/text-to-image", "text2img", 0.035),
+    "imagineart": ModelEntry("imagineart", "imagineart/imagineart-1.5-preview/text-to-image", "text2img", 0.03),
     # img2img
-    "flux-dev-i2i": ModelEntry("flux-dev-i2i", "fal-ai/flux/dev/image-to-image", "img2img", 0.025),
-    "flux-kontext": ModelEntry("flux-kontext", "fal-ai/flux-pro/kontext", "img2img", 0.05),
+    "flux-dev-i2i": ModelEntry("flux-dev-i2i", "fal-ai/flux/dev/image-to-image", "img2img", 0.03),
+    "flux-kontext": ModelEntry("flux-kontext", "fal-ai/flux-pro/kontext", "img2img", 0.04),
     "flux-2-kontext-max": ModelEntry("flux-2-kontext-max", "fal-ai/flux-2/kontext/max", "img2img", 0.08),
-    "seedream-edit": ModelEntry("seedream-edit", "fal-ai/bytedance/seedream/v5/lite/edit", "img2img", 0.03),
+    "seedream-edit": ModelEntry("seedream-edit", "fal-ai/bytedance/seedream/v5/lite/edit", "img2img", 0.035),
     "bria-edit": ModelEntry("bria-edit", "fal-ai/bria/fibo-edit/edit", "img2img", 0.04),
-    "firered-edit": ModelEntry("firered-edit", "fal-ai/firered-image-edit", "img2img", 0.03),
+    "firered-edit": ModelEntry("firered-edit", "fal-ai/firered-image-edit", "img2img", 0.0325),
     "reve-edit": ModelEntry("reve-edit", "fal-ai/reve/edit", "img2img", 0.04),
     # utility
     "birefnet": ModelEntry("birefnet", "fal-ai/birefnet/v2", "utility", 0.01),
@@ -77,6 +78,7 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
 
 
 _SCHEMA_CACHE: dict[str, str] = {}  # endpoint → image_field
+_COST_CACHE: dict[str, float | None] = {}  # endpoint → cost_per_image (None = lookup failed)
 _USER_OVERRIDES: set[str] = set()  # model names with explicit register_model() calls
 
 
@@ -144,6 +146,60 @@ def detect_image_field(endpoint: str, *, registry_default: str | None = None) ->
         )
         _SCHEMA_CACHE[endpoint] = fallback
         return fallback
+
+
+def detect_cost(endpoint: str, *, registry_default: float | None = None) -> float | None:
+    """Detect the cost per image from the fal.ai model page.
+
+    Scrapes the model page on ``fal.ai/models/<endpoint>`` for structured
+    pricing data (``billing_unit`` + ``price``).  Results are cached
+    in-memory.
+
+    Returns the price as a float, or *registry_default* on failure.
+    Billing units ``megapixels`` and ``images`` are both treated as
+    approximate per-image cost (1 megapixel ≈ 1024×1024 ≈ 1 image).
+    GPU-based pricing (``compute``) is ignored and returns the fallback.
+    """
+    if endpoint in _COST_CACHE:
+        return _COST_CACHE[endpoint]
+
+    try:
+        import httpx
+
+        resp = httpx.get(
+            f"https://fal.ai/models/{endpoint}",
+            timeout=10,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+
+        idx = resp.text.find("billing_unit")
+        if idx < 0:
+            _COST_CACHE[endpoint] = registry_default
+            return registry_default
+
+        chunk = resp.text[idx : idx + 120]
+        unit_match = re.search(r"billing_unit[^\w]*([\w]+)", chunk)
+        price_match = re.search(r"price[^\d]*([\d.]+)", chunk)
+
+        if not price_match or not unit_match:
+            _COST_CACHE[endpoint] = registry_default
+            return registry_default
+
+        unit = unit_match.group(1)
+        price = float(price_match.group(1))
+
+        # GPU-based (compute/processed) pricing can't be mapped to per-image
+        if unit in ("compute",) or price == 0.0:
+            _COST_CACHE[endpoint] = registry_default
+            return registry_default
+
+        _COST_CACHE[endpoint] = price
+        return price
+    except Exception as exc:
+        logger.debug("Could not auto-detect cost for %s: %s", endpoint, exc)
+        _COST_CACHE[endpoint] = registry_default
+        return registry_default
 
 
 def register_model(

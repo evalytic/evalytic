@@ -6,8 +6,7 @@ from .registry import resolve_model
 from .types import CostBreakdown
 
 
-# Judge cost per scored image (USD).  Gemini free-tier is $0 up to 1000
-# requests / day; paid tier is negligible.
+# Judge cost per scored image (USD).
 JUDGE_COSTS: dict[str, float] = {
     "gemini-2.0-flash": 0.0003,
     "gemini-2.5-flash": 0.0005,
@@ -28,7 +27,7 @@ JUDGE_COSTS: dict[str, float] = {
 def _resolve_judge_model(judge: str) -> str:
     """Extract the model name from a judge string for cost lookup.
 
-    ``"openai/gpt-4o"`` -> ``"gpt-4o"``, ``"gemini-2.5-flash"`` -> ``"gemini-2.5-flash"``.
+    ``"openai/gpt-5.2"`` -> ``"gpt-5.2"``, ``"gemini-2.5-flash"`` -> ``"gemini-2.5-flash"``.
     """
     if "/" in judge:
         return judge.split("/", 1)[1]
@@ -38,7 +37,7 @@ def _resolve_judge_model(judge: str) -> str:
 def estimate_run_cost(
     models: list[str],
     item_count: int,
-    judge: str = "gemini-2.0-flash",
+    judge: str = "gemini-2.5-flash",
     dimensions_per_item: int = 2,
     judges: list[str] | None = None,
 ) -> CostBreakdown:
@@ -109,7 +108,7 @@ def build_cost_breakdown(
     generation_costs: dict[str, float],
     generation_count: int,
     judge_request_count: int,
-    judge: str = "gemini-2.0-flash",
+    judge: str = "gemini-2.5-flash",
     judges: list[str] | None = None,
     judge_request_counts: dict[str, int] | None = None,
 ) -> CostBreakdown:

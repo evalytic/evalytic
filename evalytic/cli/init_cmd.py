@@ -228,4 +228,4 @@ def init_cmd(force: bool, skip_demo: bool) -> None:
         console.print("    evalytic gate --report results.json --threshold 3.5")
 
     console.print("\n    evalytic --help        Full command list")
-    console.print("    https://evalytic.dev   Documentation\n")
+    console.print("    https://docs.evalytic.ai   Documentation\n")

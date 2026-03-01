@@ -41,7 +41,7 @@ def _auto_detect_eval_dimensions(
 )
 @click.option("--prompt", default=None, help="Generation prompt (enables prompt_adherence scoring).")
 @click.option("--input-image", default=None, help="Input image path/URL (enables img2img dimensions).")
-@click.option("--judge", "-j", default="gemini-2.5-flash", show_default=True, help="VLM judge (e.g. openai/gpt-4o, ollama/qwen2.5-vl:7b).")
+@click.option("--judge", "-j", default="gemini-2.5-flash", show_default=True, help="VLM judge (e.g. openai/gpt-5.2, ollama/qwen2.5-vl:7b).")
 @click.option("--judge-url", default=None, help="Custom judge API base URL.")
 @click.option("--output", "-o", default=None, help="Write results to JSON file.")
 def eval_cmd(

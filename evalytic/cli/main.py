@@ -57,7 +57,7 @@ def cli(ctx: click.Context, verbose: bool, config_path: str | None) -> None:
     config   Configuration management
 
   Run evalytic <command> --help for details.
-  Docs: https://evalytic.dev
+  Docs: https://docs.evalytic.ai
 """)
 
 

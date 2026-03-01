@@ -12,9 +12,9 @@ Know if your AI-generated visuals are good — before your users tell you they'r
 pip install evalytic
 
 evaly bench \
-  --models flux-schnell flux-dev flux-pro \
-  --prompts "A photorealistic cat on a windowsill" \
-  --output report.html
+  -m flux-schnell -m flux-dev -m flux-pro \
+  -p "A photorealistic cat on a windowsill" \
+  -o report.html --yes
 ```
 
 ## What It Does
@@ -40,7 +40,7 @@ pip install evalytic
 
 ```bash
 export FAL_KEY=your_fal_key          # fal.ai for image generation
-export GEMINI_API_KEY=your_gemini_key  # Free tier: 1,000 req/day
+export GEMINI_API_KEY=your_gemini_key  # Default judge
 ```
 
 ### 3. Run
@@ -77,8 +77,8 @@ evaly gate --report report.json --threshold 3.5
 Any VLM that can analyze images works as a judge:
 
 ```bash
-evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash        # Default (free)
-evaly bench -m flux-schnell -p "A cat" -j gemini-3-flash           # Gemini 3
+evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash        # Default
+evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-pro           # Gemini Pro
 evaly bench -m flux-schnell -p "A cat" -j openai/gpt-5.2           # OpenAI
 evaly bench -m flux-schnell -p "A cat" -j anthropic/claude-sonnet-4-6  # Anthropic
 evaly bench -m flux-schnell -p "A cat" -j ollama/qwen2.5-vl:7b    # Local

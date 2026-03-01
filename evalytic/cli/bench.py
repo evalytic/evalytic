@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..bench.cost import estimate_run_cost, format_cost
-from ..bench.registry import UnknownModelError, list_models as _list_models, resolve_model
+from ..bench.registry import UnknownModelError, list_models as _list_models, register_model, resolve_model
 from ..report.terminal import (
     confirm_proceed,
     console,
@@ -99,7 +99,7 @@ def _parse_images_file(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
     1. Object with optional top-level config + ``items`` list::
 
         {
-            "judge": "openai/gpt-4o",
+            "judge": "openai/gpt-5.2",
             "dimensions": ["visual_quality", "prompt_adherence"],
             "items": [
                 {"prompt": "A cat", "images": {"model1": "url1", "model2": "url2"}}
@@ -151,6 +151,7 @@ def _run_images_mode(
     quiet: bool,
     no_terminal: bool,
     metrics: tuple[str, ...],
+    no_metrics: bool,
     review: bool,
     review_port: int,
     clip_threshold: float | None,
@@ -207,10 +208,23 @@ def _run_images_mode(
         print_bench_header(name or "bench", model_count, len(items), pipeline)
         console.print("  [dim]Mode: score-only (pre-existing images)[/dim]\n")
 
-    # Check metrics availability
+    # Check metrics availability — auto-detect if not specified
     metrics_list = list(metrics)
     if "metrics" in file_config and not metrics_list:
         metrics_list = file_config["metrics"]
+    if not metrics_list and not no_metrics:
+        # Auto-detect based on pipeline
+        try:
+            from ..bench.metrics import METRICS_AVAILABLE
+            if METRICS_AVAILABLE:
+                if pipeline == "img2img":
+                    metrics_list = ["lpips"]
+                else:
+                    metrics_list = ["clip"]
+        except Exception:
+            pass
+    if no_metrics:
+        metrics_list = []
     if metrics_list:
         from ..bench.metrics import METRICS_AVAILABLE
 
@@ -461,7 +475,7 @@ class GroupedBenchCommand(click.Command):
 @click.option("--dataset", "dataset_path", default=None, help="Path to dataset file (enriched prompts with metadata/expected).")
 @click.option("--check-expected", is_flag=True, help="Compare results against expected scores in dataset.")
 @click.option("--judge", "-j", default=None, help="VLM judge (default: gemini-2.5-flash). E.g. gemini-3-flash, gpt-5.2, claude-sonnet-4-6, ollama/qwen3-vl.")
-@click.option("--judges", default=None, help="Comma-separated judges for consensus (e.g. 'gemini-3-flash,gpt-4o-mini'). Min 2, max 3.")
+@click.option("--judges", default=None, help="Comma-separated judges for consensus (e.g. 'gemini-2.5-flash,gpt-5.2'). Min 2, max 3.")
 @click.option("--judge-url", default=None, help="Custom judge API base URL.")
 @click.option("--dimensions", "-d", multiple=True, help="Quality dimensions to score.")
 @click.option("--output", "-o", multiple=True, help="Output file paths (.json, .html).")
@@ -476,7 +490,8 @@ class GroupedBenchCommand(click.Command):
 @click.option("--yes", "-y", is_flag=True, help="Skip cost confirmation.")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress bars.")
 @click.option("--no-terminal", is_flag=True, help="Suppress Rich terminal output.")
-@click.option("--metrics", multiple=True, help="Local metrics to compute: clip, lpips.")
+@click.option("--metrics", multiple=True, help="Local metrics to compute: clip, lpips. Auto-detected if evalytic[metrics] installed.")
+@click.option("--no-metrics", is_flag=True, help="Disable automatic metrics (CLIP/LPIPS).")
 @click.option("--review", is_flag=True, help="Open browser review after scoring.")
 @click.option("--review-port", default=3847, show_default=True, help="Port for review server.")
 @click.option("--clip-threshold", default=None, type=float, help="CLIP flag threshold (default: 0.18).")
@@ -513,6 +528,7 @@ def bench(
     quiet: bool,
     no_terminal: bool,
     metrics: tuple[str, ...],
+    no_metrics: bool,
     review: bool,
     review_port: int,
     clip_threshold: float | None,
@@ -605,6 +621,7 @@ def bench(
             quiet=quiet,
             no_terminal=no_terminal,
             metrics=metrics,
+            no_metrics=no_metrics,
             review=review,
             review_port=review_port,
             clip_threshold=clip_threshold,
@@ -678,6 +695,18 @@ def bench(
             console.print("  List all: evalytic bench --list-models")
             sys.exit(2)
 
+    # Apply model overrides from evalytic.toml [bench.model_overrides]
+    model_overrides = cfg.get("model_overrides", {})
+    for override_name, override_vals in model_overrides.items():
+        if isinstance(override_vals, dict):
+            register_model(
+                override_name,
+                endpoint=override_vals.get("endpoint"),
+                pipeline=override_vals.get("pipeline"),
+                cost_per_image=override_vals.get("cost"),
+                image_field=override_vals.get("image_field"),
+            )
+
     # Resolve and validate model names
     for m in models:
         try:
@@ -734,8 +763,26 @@ def bench(
 
     dims = list(dimensions) if dimensions else None
 
-    # Check metrics availability
+    # Check metrics availability — auto-detect if not specified
     metrics_list = list(metrics)
+    if not metrics_list and not no_metrics:
+        # Check config
+        cfg_metric_names = cfg.get("metrics", {}).get("enabled") if isinstance(cfg.get("metrics"), dict) else None
+        if cfg_metric_names:
+            metrics_list = list(cfg_metric_names)
+        else:
+            # Auto-detect based on pipeline
+            try:
+                from ..bench.metrics import METRICS_AVAILABLE
+                if METRICS_AVAILABLE:
+                    if pipeline == "img2img":
+                        metrics_list = ["lpips"]
+                    else:
+                        metrics_list = ["clip"]
+            except Exception:
+                pass
+    if no_metrics:
+        metrics_list = []
     if metrics_list:
         from ..bench.metrics import METRICS_AVAILABLE
 

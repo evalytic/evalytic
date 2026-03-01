@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 def report_to_dict(report: BenchReport) -> dict[str, Any]:
     """Convert a BenchReport to the JSON schema dict."""
     d: dict[str, Any] = {
-        "$schema": "https://evalytic.dev/schemas/bench-report-v1.json",
+        "$schema": "https://evalytic.ai/schemas/bench-report-v1.json",
         "version": "1.0",
         "name": report.name,
         "created_at": report.created_at,
