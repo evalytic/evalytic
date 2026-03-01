@@ -1,6 +1,6 @@
 # Evalytic
 
-**Evals for visual AI.** Automated quality evaluation for AI-generated visuals.
+**Evals for visual AI.** Automated quality evaluation for AI-generated images and video.
 
 [![PyPI](https://img.shields.io/pypi/v/evalytic)](https://pypi.org/project/evalytic/)
 [![Python](https://img.shields.io/pypi/pyversions/evalytic)](https://pypi.org/project/evalytic/)
@@ -19,13 +19,14 @@ evaly bench \
 
 ## What It Does
 
-Evalytic benchmarks AI image generation models by generating images, scoring them with VLM judges (Gemini, GPT-5, Claude, Ollama), and producing rich reports — all in one command.
+Evalytic benchmarks AI image generation models by generating images, scoring them with VLM judges (Gemini, GPT, Claude, Ollama), and producing rich reports — all in one command.
 
 - **Model Selection** — Compare Flux Schnell vs Dev vs Pro with real prompts
 - **Prompt Optimization** — Measure how well models follow your prompts
 - **Regression Detection** — Catch quality drops when models update
 - **CI/CD Quality Gate** — Block deploys when image quality falls below threshold
-- **6 Semantic Dimensions** — visual_quality, prompt_adherence, text_rendering, input_fidelity, transformation_quality, artifact_detection
+- **7 Semantic Dimensions** — visual_quality, prompt_adherence, text_rendering, input_fidelity, transformation_quality, artifact_detection, identity_preservation
+- **Consensus Judging** — Multi-judge scoring with automatic agreement analysis
 
 ## Quickstart
 
@@ -52,6 +53,10 @@ evaly bench -m flux-schnell -p "A cat sitting on a windowsill" --yes
 evaly bench -m flux-schnell -m flux-dev -m flux-pro \
   -p prompts.json -o report.html --review
 
+# img2img benchmark
+evaly bench -m flux-kontext -m seedream-edit -m reve-edit \
+  -p prompts.json --input product.jpg --yes
+
 # Score an existing image
 evaly eval --image output.png --prompt "A sunset over mountains"
 
@@ -72,16 +77,28 @@ evaly gate --report report.json --threshold 3.5
 Any VLM that can analyze images works as a judge:
 
 ```bash
-evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash     # Default (free)
-evaly bench -m flux-schnell -p "A cat" -j openai/gpt-5.2       # OpenAI
-evaly bench -m flux-schnell -p "A cat" -j anthropic/claude-sonnet-4  # Anthropic
-evaly bench -m flux-schnell -p "A cat" -j ollama/qwen2.5-vl:7b # Local
+evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash        # Default (free)
+evaly bench -m flux-schnell -p "A cat" -j gemini-3-flash           # Gemini 3
+evaly bench -m flux-schnell -p "A cat" -j openai/gpt-5.2           # OpenAI
+evaly bench -m flux-schnell -p "A cat" -j anthropic/claude-sonnet-4-6  # Anthropic
+evaly bench -m flux-schnell -p "A cat" -j ollama/qwen2.5-vl:7b    # Local
 ```
+
+### Consensus Mode
+
+Use multiple judges for more reliable scores:
+
+```bash
+evaly bench -m flux-schnell -p "A cat" \
+  --judges "gemini-2.5-flash,openai/gpt-5.2"
+```
+
+Two judges score in parallel. If they disagree, a third breaks the tie.
 
 ## Optional Extras
 
 ```bash
-pip install "evalytic[metrics]"  # CLIP Score + LPIPS (~2GB)
+pip install "evalytic[metrics]"  # CLIP Score + LPIPS + ArcFace (~2GB)
 pip install "evalytic[all]"      # Everything
 ```
 
@@ -102,7 +119,7 @@ concurrency = 4
 
 ## Documentation
 
-Full docs at [docs.evalytic.dev](https://docs.evalytic.dev)
+Full docs at [docs.evalytic.ai](https://docs.evalytic.ai)
 
 ## License
 

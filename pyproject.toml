@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evalytic"
-version = "0.2.1"
+version = "0.3.0"
 description = "Visual Generation Quality Evaluation SDK"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Evalytic", email = "hello@evalytic.dev" },
+    { name = "Evalytic", email = "hello@evalytic.ai" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -60,8 +60,8 @@ evalytic = "evalytic.cli.main:cli"
 evaly = "evalytic.cli.main:cli"
 
 [project.urls]
-Homepage = "https://evalytic.dev"
-Documentation = "https://docs.evalytic.dev"
+Homepage = "https://evalytic.ai"
+Documentation = "https://docs.evalytic.ai"
 Repository = "https://github.com/evalytic/evalytic"
 Issues = "https://github.com/evalytic/evalytic/issues"
 
