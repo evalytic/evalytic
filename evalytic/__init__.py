@@ -23,7 +23,7 @@ Python API:
     print(result.display_score)  # "3.8/5"
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 from .client import _get_client, init
 from .compare import compare

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evalytic"
-version = "0.3.1"
+version = "0.3.2"
 description = "Visual Generation Quality Evaluation SDK"
 readme = "README.md"
 license = "MIT"
