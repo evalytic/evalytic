@@ -1072,6 +1072,98 @@ class TestConfig:
 
 
 # -----------------------------------------------------------------------
+# Sharpness scorer (no torch required)
+# -----------------------------------------------------------------------
+
+
+class TestSharpnessScorer:
+    def test_score_returns_float_in_range(self, tmp_path: Path) -> None:
+        """SharpnessScorer returns a float in [0, 1]."""
+        from PIL import Image
+        from evalytic.bench.metrics import SharpnessScorer
+
+        # Create a sharp test image with edges
+        img = Image.new("RGB", (256, 256), "white")
+        pixels = img.load()
+        for x in range(128):
+            for y in range(256):
+                pixels[x, y] = (0, 0, 0)
+        path = str(tmp_path / "sharp.png")
+        img.save(path)
+
+        scorer = SharpnessScorer()
+        val = scorer.score(path)
+        assert isinstance(val, float)
+        assert 0.0 <= val <= 1.0
+
+    def test_sharp_vs_blurry(self, tmp_path: Path) -> None:
+        """Sharp image scores higher than blurry image."""
+        from PIL import Image, ImageFilter
+        from evalytic.bench.metrics import SharpnessScorer
+
+        # Sharp: high-frequency checkerboard
+        img = Image.new("RGB", (256, 256))
+        pixels = img.load()
+        for x in range(256):
+            for y in range(256):
+                c = 255 if (x // 4 + y // 4) % 2 == 0 else 0
+                pixels[x, y] = (c, c, c)
+        sharp_path = str(tmp_path / "sharp.png")
+        img.save(sharp_path)
+
+        # Blurry: heavily gaussian-blurred version
+        blurry = img.filter(ImageFilter.GaussianBlur(radius=10))
+        blurry_path = str(tmp_path / "blurry.png")
+        blurry.save(blurry_path)
+
+        scorer = SharpnessScorer()
+        sharp_score = scorer.score(sharp_path)
+        blurry_score = scorer.score(blurry_path)
+        assert sharp_score > blurry_score, f"sharp={sharp_score} should be > blurry={blurry_score}"
+
+    def test_uniform_image_low_score(self, tmp_path: Path) -> None:
+        """Uniform (no edges) image gets low sharpness score."""
+        from PIL import Image
+        from evalytic.bench.metrics import SharpnessScorer
+
+        img = Image.new("RGB", (256, 256), (128, 128, 128))
+        path = str(tmp_path / "uniform.png")
+        img.save(path)
+
+        scorer = SharpnessScorer()
+        val = scorer.score(path)
+        assert val < 0.2, f"Uniform image should have low sharpness, got {val}"
+
+    def test_compute_metrics_sharpness(self, tmp_path: Path) -> None:
+        """compute_metrics includes sharpness without METRICS_AVAILABLE."""
+        from PIL import Image
+        from evalytic.bench.metrics import compute_metrics
+        from evalytic.bench.types import BenchItem, ImageResult
+
+        img = Image.new("RGB", (64, 64), "red")
+        img_path = str(tmp_path / "test.png")
+        img.save(img_path)
+
+        item = BenchItem(
+            item_id="t1",
+            prompt="test",
+            results={
+                "model-a": ImageResult(
+                    model="model-a",
+                    image_url="http://example.com/img.png",
+                    image_local=img_path,
+                    status="success",
+                ),
+            },
+        )
+        compute_metrics([item], ["sharpness"], "text2img", [{"item_id": "t1", "prompt": "test"}])
+        metrics = item.results["model-a"].metrics
+        assert len(metrics) == 1
+        assert metrics[0].metric == "sharpness"
+        assert 0.0 <= metrics[0].value <= 1.0
+
+
+# -----------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------
 

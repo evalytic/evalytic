@@ -2,6 +2,8 @@
 
 Requires ``pip install evalytic[metrics]`` for torch, transformers, and lpips.
 Gracefully degrades when dependencies are missing -- sets METRICS_AVAILABLE = False.
+
+Lightweight metrics (sharpness) run with only numpy+PIL — no torch required.
 """
 
 from __future__ import annotations
@@ -195,6 +197,44 @@ class FaceScorer:
 
 
 # ---------------------------------------------------------------------------
+# Sharpness scorer (Variance of Laplacian) — no torch required
+# ---------------------------------------------------------------------------
+
+
+class SharpnessScorer:
+    """Measure image sharpness via Variance of Laplacian.
+
+    Higher values = sharper image.  No heavy dependencies — uses only
+    numpy and PIL which are already available in the base SDK.
+
+    The raw variance is resolution-dependent, so we normalise to a 0-1
+    scale using an empirical sigmoid: ``1 / (1 + exp(-k * (log(vol) - midpoint)))``.
+    """
+
+    def score(self, image_path: str) -> float:
+        """Return sharpness score in [0.0, 1.0].  Higher = sharper."""
+        import numpy as np
+        from PIL import Image, ImageFilter
+
+        img = Image.open(image_path).convert("L")
+        # Resize to consistent resolution so scores are comparable
+        img = img.resize((512, 512), Image.LANCZOS)
+        # Laplacian via PIL kernel (3x3 approximation)
+        laplacian = img.filter(ImageFilter.Kernel(
+            size=(3, 3),
+            kernel=[0, 1, 0, 1, -4, 1, 0, 1, 0],
+            scale=1,
+            offset=128,
+        ))
+        arr = np.asarray(laplacian, dtype=np.float64) - 128.0
+        vol = float(np.var(arr))
+        # Sigmoid normalisation: midpoint ~500, k tuned for AI-generated images
+        log_vol = np.log1p(vol)
+        score = 1.0 / (1.0 + np.exp(-1.5 * (log_vol - 5.0)))
+        return round(max(0.0, min(1.0, float(score))), 4)
+
+
+# ---------------------------------------------------------------------------
 # Batch compute
 # ---------------------------------------------------------------------------
 
@@ -241,12 +281,14 @@ def compute_metrics(
     * ``clip`` — only for text2img (needs a text prompt)
     * ``lpips`` — only for img2img (needs an input image)
     * ``face`` — only for img2img (needs an input image with faces)
+    * ``sharpness`` — always available (no torch, uses numpy+PIL)
     """
     from .types import MetricResult
 
     clip_scorer: CLIPScorer | None = None
     lpips_scorer: LPIPSScorer | None = None
     face_scorer: FaceScorer | None = None
+    sharpness_scorer: SharpnessScorer | None = None
 
     if "clip" in metric_types and pipeline == "text2img":
         clip_scorer = CLIPScorer(cache_dir=cache_dir)
@@ -254,8 +296,10 @@ def compute_metrics(
         lpips_scorer = LPIPSScorer(cache_dir=cache_dir)
     if "face" in metric_types and pipeline == "img2img":
         face_scorer = FaceScorer(cache_dir=cache_dir)
+    if "sharpness" in metric_types:
+        sharpness_scorer = SharpnessScorer()
 
-    if clip_scorer is None and lpips_scorer is None and face_scorer is None:
+    if clip_scorer is None and lpips_scorer is None and face_scorer is None and sharpness_scorer is None:
         return
 
     # Build a prompt lookup: item_id -> prompt text
@@ -328,6 +372,19 @@ def compute_metrics(
                 except Exception:
                     pass  # skip on failure
 
+            if sharpness_scorer:
+                try:
+                    val = sharpness_scorer.score(img_result.image_local)
+                    img_result.metrics.append(
+                        MetricResult(
+                            metric="sharpness",
+                            value=val,
+                            description="Variance of Laplacian sharpness (0-1, higher=sharper)",
+                        )
+                    )
+                except Exception:
+                    pass  # skip on failure
+
 
 # ---------------------------------------------------------------------------
 # Metric scoring: normalization + threshold
@@ -351,7 +408,7 @@ def check_metric_threshold(
     from .types import MetricFlag
 
     if value <= config.flag_threshold:
-        label = {"clip_score": "CLIP score", "lpips": "LPIPS similarity", "face_similarity": "Face similarity"}.get(metric, metric)
+        label = {"clip_score": "CLIP score", "lpips": "LPIPS similarity", "face_similarity": "Face similarity", "sharpness": "Sharpness"}.get(metric, metric)
         return MetricFlag(
             metric=metric,
             value=value,

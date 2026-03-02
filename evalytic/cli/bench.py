@@ -218,23 +218,27 @@ def _run_images_mode(
             from ..bench.metrics import METRICS_AVAILABLE
             if METRICS_AVAILABLE:
                 if pipeline == "img2img":
-                    metrics_list = ["lpips"]
+                    metrics_list = ["lpips", "sharpness"]
                 else:
-                    metrics_list = ["clip"]
+                    metrics_list = ["clip", "sharpness"]
+            else:
+                metrics_list = ["sharpness"]
         except Exception:
-            pass
+            metrics_list = ["sharpness"]
     if no_metrics:
         metrics_list = []
     if metrics_list:
-        from ..bench.metrics import METRICS_AVAILABLE
+        heavy = [m for m in metrics_list if m not in ("sharpness",)]
+        if heavy:
+            from ..bench.metrics import METRICS_AVAILABLE
 
-        if not METRICS_AVAILABLE:
-            console.print(
-                "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
-                "Metrics will be skipped.\n"
-                "  Install with: pip install evalytic[metrics]\n"
-            )
-            metrics_list = []
+            if not METRICS_AVAILABLE:
+                console.print(
+                    "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
+                    "Heavy metrics will be skipped (sharpness still active).\n"
+                    "  Install with: pip install evalytic[metrics]\n"
+                )
+                metrics_list = [m for m in metrics_list if m == "sharpness"]
 
     # Build scoring config
     scoring_config = None
@@ -776,23 +780,30 @@ def bench(
                 from ..bench.metrics import METRICS_AVAILABLE
                 if METRICS_AVAILABLE:
                     if pipeline == "img2img":
-                        metrics_list = ["lpips"]
+                        metrics_list = ["lpips", "sharpness"]
                     else:
-                        metrics_list = ["clip"]
+                        metrics_list = ["clip", "sharpness"]
+                else:
+                    # Sharpness needs no torch — always available
+                    metrics_list = ["sharpness"]
             except Exception:
-                pass
+                metrics_list = ["sharpness"]
     if no_metrics:
         metrics_list = []
     if metrics_list:
-        from ..bench.metrics import METRICS_AVAILABLE
+        # Sharpness is always available (numpy+PIL only). Warn only if
+        # heavy metrics (clip/lpips/face) are requested without torch.
+        heavy = [m for m in metrics_list if m not in ("sharpness",)]
+        if heavy:
+            from ..bench.metrics import METRICS_AVAILABLE
 
-        if not METRICS_AVAILABLE:
-            console.print(
-                "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
-                "Metrics will be skipped.\n"
-                "  Install with: pip install evalytic[metrics]\n"
-            )
-            metrics_list = []
+            if not METRICS_AVAILABLE:
+                console.print(
+                    "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
+                    "Heavy metrics will be skipped (sharpness still active).\n"
+                    "  Install with: pip install evalytic[metrics]\n"
+                )
+                metrics_list = [m for m in metrics_list if m == "sharpness"]
 
     # Cost estimate
     cost_est = estimate_run_cost(

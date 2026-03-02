@@ -299,9 +299,18 @@ def run_bench(
     if metrics:
         from .metrics import METRICS_AVAILABLE, compute_metrics
 
+        # Sharpness needs no torch — always available.  Others need METRICS_AVAILABLE.
+        heavy_metrics = [m for m in metrics if m != "sharpness"]
+        has_sharpness = "sharpness" in metrics
+        run_metrics: list[str] = []
         if METRICS_AVAILABLE:
+            run_metrics = list(metrics)
+        elif has_sharpness:
+            run_metrics = ["sharpness"]
+
+        if run_metrics:
             source_items = inputs if inputs else (prompts or [])
-            compute_metrics(bench_items, metrics, pipeline, source_items, cache_dir=cache_dir)
+            compute_metrics(bench_items, run_metrics, pipeline, source_items, cache_dir=cache_dir)
 
     # ---- AGGREGATE ----
     # Use default scoring config when metrics are active but no config given

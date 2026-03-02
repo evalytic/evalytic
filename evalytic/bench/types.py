@@ -136,9 +136,9 @@ class DimensionResult:
 
 @dataclass
 class MetricResult:
-    """Local metric result for one image (CLIP / LPIPS)."""
+    """Local metric result for one image (CLIP / LPIPS / sharpness)."""
 
-    metric: str  # "clip_score" or "lpips"
+    metric: str  # "clip_score", "lpips", "face_similarity", or "sharpness"
     value: float
     description: str = ""
 
