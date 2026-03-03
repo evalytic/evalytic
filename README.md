@@ -36,14 +36,22 @@ Evalytic benchmarks AI image generation models by generating images, scoring the
 pip install evalytic
 ```
 
-### 2. Set API Keys
+### 2. See Real Examples (no API key needed)
+
+```bash
+evaly demo              # Opens showcase with 4 real benchmark case studies
+evaly demo face         # Face identity preservation comparison
+evaly demo flagship     # Flux Schnell vs Dev vs Pro cost/quality
+```
+
+### 3. Set API Keys
 
 ```bash
 export FAL_KEY=your_fal_key          # fal.ai for image generation
 export GEMINI_API_KEY=your_gemini_key  # Default judge
 ```
 
-### 3. Run
+### 4. Run
 
 ```bash
 # Single model benchmark
@@ -68,6 +76,7 @@ evaly gate --report report.json --threshold 3.5
 
 | Command | Description |
 |---------|-------------|
+| `evaly demo` | Browse real benchmark showcases (no API key needed) |
 | `evaly bench` | Generate, score, and report in one command |
 | `evaly eval` | Score a single image without generation |
 | `evaly gate` | CI/CD quality gate with pass/fail exit codes |

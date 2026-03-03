@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from .bench import bench
 from .config_cmd import config_group
 from .dataset_cmd import dataset_group
+from .demo_cmd import demo_cmd
 from .eval_cmd import eval_cmd
 from .gate import gate
 from .init_cmd import init_cmd
@@ -38,20 +39,24 @@ def cli(ctx: click.Context, verbose: bool, config_path: str | None) -> None:
   Evalytic v{__version__} -- Evals for visual AI
 
   Quick Start:
-    1. Set API keys:
+    1. See what Evalytic can do (no API key needed):
+       evalytic demo
+
+    2. Set API keys:
        export FAL_KEY=...          # fal.ai (image generation)
        export GEMINI_API_KEY=...   # Google Gemini (free, for scoring)
 
-    2. Run your first benchmark:
+    3. Run your first benchmark:
        evalytic bench -m flux-schnell -p "A cat in a top hat" -y
 
-    3. Compare models:
+    4. Compare models:
        evalytic bench -m flux-schnell -m flux-dev -p "A cat" -y
 
   Commands:
     bench    Benchmark models: generate, score, report
     eval     Score an existing image (no generation)
     gate     CI/CD quality gate with exit codes
+    demo     Open real benchmark showcase
     dataset  Manage evaluation datasets
     init     Interactive setup wizard
     config   Configuration management
@@ -64,6 +69,7 @@ def cli(ctx: click.Context, verbose: bool, config_path: str | None) -> None:
 cli.add_command(bench)
 cli.add_command(eval_cmd)
 cli.add_command(gate)
+cli.add_command(demo_cmd)
 cli.add_command(dataset_group)
 cli.add_command(init_cmd)
 cli.add_command(config_group)
