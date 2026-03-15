@@ -29,11 +29,13 @@ from ..report.terminal import (
 # ---------------------------------------------------------------------------
 
 
-def _parse_prompts(value: str) -> tuple[str, list[dict[str, Any]]]:
-    """Parse ``--prompts`` value.
+def _parse_prompts(value: str, *, as_image_url: bool = False) -> tuple[str, list[dict[str, Any]]]:
+    """Parse ``--prompts`` or ``--inputs`` value.
 
     Returns ``(pipeline, items)`` where *items* is a list of dicts.
     If *value* is a file path that exists, it is loaded as JSON.
+    If *as_image_url* is True and *value* looks like a URL, it is treated
+    as an image URL (for ``--inputs``).
     Otherwise it is treated as a single inline prompt string.
     """
     if os.path.isfile(value):
@@ -67,6 +69,9 @@ def _parse_prompts(value: str) -> tuple[str, list[dict[str, Any]]]:
             else:
                 pipeline = "text2img"
         return pipeline, items
+    # Inline URL for --inputs
+    if as_image_url and value.startswith(("http://", "https://")):
+        return "img2img", [{"image_url": value}]
     # Inline single prompt
     return "text2img", [{"prompt": value}]
 
@@ -160,14 +165,21 @@ def _run_images_mode(
     lpips_weight: float | None,
     face_threshold: float | None,
     face_weight: float | None,
-    no_metric_scoring: bool,
-    verbose: bool,
+    dim_weights_dict: dict[str, float] | None = None,
+    clip_range: tuple[float, float] | None = None,
+    lpips_range: tuple[float, float] | None = None,
+    face_range: tuple[float, float] | None = None,
+    no_metric_scoring: bool = False,
+    no_judge: bool = False,
+    verbose: bool = False,
 ) -> None:
     """Handle --images mode: score pre-existing images (no generation)."""
     items, file_config = _parse_images_file(images_path)
 
     # File-level config overrides CLI defaults (CLI flags still win)
-    if judge == "gemini-2.5-flash" and "judge" in file_config:
+    # File-level judge override only if user didn't set --judge explicitly
+    cli_judge_explicit = click.get_current_context().get_parameter_source("judge") == click.core.ParameterSource.COMMANDLINE
+    if not cli_judge_explicit and "judge" in file_config:
         judge = file_config["judge"]
     if not dimensions and "dimensions" in file_config:
         dimensions = tuple(file_config["dimensions"])
@@ -177,21 +189,23 @@ def _run_images_mode(
     dims = list(dimensions) if dimensions else None
 
     # Check judge API key (no FAL_KEY needed)
-    from ..bench.judge import _parse_judge_string, _PROVIDER_DEFAULTS
+    if not no_judge:
+        from ..bench.judge import _parse_judge_string, _PROVIDER_DEFAULTS
 
-    provider, _ = _parse_judge_string(judge)
-    env_key = _PROVIDER_DEFAULTS.get(provider, {}).get("env_key")
-    if env_key:
-        help_urls = {
-            "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
-            "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
-            "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
-        }
-        _check_api_key(
-            env_key,
-            help_urls.get(env_key, "your provider dashboard"),
-            f"The {judge} judge requires an API key.",
-        )
+        provider, _ = _parse_judge_string(judge)
+        env_key = _PROVIDER_DEFAULTS.get(provider, {}).get("env_key")
+        if env_key:
+            help_urls = {
+                "FAL_KEY": "https://fal.ai/dashboard/keys",
+                "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
+                "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
+                "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
+            }
+            _check_api_key(
+                env_key,
+                help_urls.get(env_key, "your provider dashboard"),
+                f"The {judge} judge requires an API key.",
+            )
 
     # Extract model count from items for header
     all_models: dict[str, None] = {}
@@ -251,23 +265,29 @@ def _run_images_mode(
             sc.metric_configs["clip_score"] = MetricScoringConfig(
                 flag_threshold=clip_threshold if clip_threshold is not None else base.flag_threshold,
                 weight=clip_weight if clip_weight is not None else base.weight,
-                normalize_range=base.normalize_range,
+                normalize_range=tuple(clip_range) if clip_range else base.normalize_range,
             )
         if "lpips" in sc.metric_configs or lpips_threshold is not None or lpips_weight is not None:
             base = sc.metric_configs.get("lpips", MetricScoringConfig(0.40, 0.20, (0.40, 0.95)))
             sc.metric_configs["lpips"] = MetricScoringConfig(
                 flag_threshold=lpips_threshold if lpips_threshold is not None else base.flag_threshold,
                 weight=lpips_weight if lpips_weight is not None else base.weight,
-                normalize_range=base.normalize_range,
+                normalize_range=tuple(lpips_range) if lpips_range else base.normalize_range,
             )
         if "face_similarity" in sc.metric_configs or face_threshold is not None or face_weight is not None:
             base = sc.metric_configs.get("face_similarity", MetricScoringConfig(0.60, 0.20, (0.60, 0.95)))
             sc.metric_configs["face_similarity"] = MetricScoringConfig(
                 flag_threshold=face_threshold if face_threshold is not None else base.flag_threshold,
                 weight=face_weight if face_weight is not None else base.weight,
-                normalize_range=base.normalize_range,
+                normalize_range=tuple(face_range) if face_range else base.normalize_range,
             )
+        if dim_weights_dict:
+            sc.dimension_weights = dim_weights_dict
         scoring_config = sc
+    elif dim_weights_dict:
+        from ..bench.types import ScoringConfig
+
+        scoring_config = ScoringConfig(dimension_weights=dim_weights_dict)
 
     # Run bench with pre_images
     from ..bench.runner import run_bench
@@ -284,6 +304,7 @@ def _run_images_mode(
             concurrency=concurrency,
             name=name,
             scoring_config=scoring_config,
+            no_judge=no_judge,
             verbose=verbose,
         )
     except EvalyticError as exc:
@@ -433,7 +454,7 @@ def _check_expected_scores(
 
 _ESSENTIAL_BENCH_PARAMS = {
     "models", "prompts", "inputs", "images", "dataset", "output",
-    "output_dir", "yes", "review", "judge", "judges", "list_models",
+    "output_dir", "yes", "review", "judge", "judges", "no_judge", "list_models",
 }
 
 
@@ -478,7 +499,7 @@ class GroupedBenchCommand(click.Command):
 @click.option("--images", default=None, help="Path to JSON file with pre-existing images (skip generation).")
 @click.option("--dataset", "dataset_path", default=None, help="Path to dataset file (enriched prompts with metadata/expected).")
 @click.option("--check-expected", is_flag=True, help="Compare results against expected scores in dataset.")
-@click.option("--judge", "-j", default=None, help="VLM judge (default: gemini-2.5-flash). E.g. gemini-3-flash, gpt-5.2, claude-sonnet-4-6, ollama/qwen3-vl.")
+@click.option("--judge", "-j", default=None, help="VLM judge (auto-detected from config/env). E.g. fal/gemini-2.5-flash, gpt-5.2, claude-sonnet-4-6, ollama/qwen3-vl.")
 @click.option("--judges", default=None, help="Comma-separated judges for consensus (e.g. 'gemini-2.5-flash,gpt-5.2'). Min 2, max 3.")
 @click.option("--judge-url", default=None, help="Custom judge API base URL.")
 @click.option("--dimensions", "-d", multiple=True, help="Quality dimensions to score.")
@@ -504,7 +525,12 @@ class GroupedBenchCommand(click.Command):
 @click.option("--lpips-weight", default=None, type=float, help="LPIPS weight in overall score (default: 0.20).")
 @click.option("--face-threshold", default=None, type=float, help="Face similarity flag threshold (default: 0.60).")
 @click.option("--face-weight", default=None, type=float, help="Face similarity weight in overall score (default: 0.20).")
+@click.option("--dim-weights", default=None, help='Dimension weights JSON: \'{"input_fidelity": 0.5, "visual_quality": 0.1}\'.')
+@click.option("--clip-range", default=None, nargs=2, type=float, help="CLIP normalize range min max (default: 0.18 0.35).")
+@click.option("--lpips-range", default=None, nargs=2, type=float, help="LPIPS normalize range min max (default: 0.40 0.95).")
+@click.option("--face-range", default=None, nargs=2, type=float, help="Face similarity normalize range min max (default: 0.60 0.95).")
 @click.option("--no-metric-scoring", is_flag=True, help="Show metrics but exclude from overall score.")
+@click.option("--no-judge", is_flag=True, help="Skip VLM judge, use local metrics only (free, no API key needed).")
 @click.option("--list-models", is_flag=True, help="Print model registry and exit.")
 @click.pass_context
 def bench(
@@ -541,7 +567,12 @@ def bench(
     lpips_weight: float | None,
     face_threshold: float | None,
     face_weight: float | None,
+    dim_weights: str | None,
+    clip_range: tuple[float, float] | None,
+    lpips_range: tuple[float, float] | None,
+    face_range: tuple[float, float] | None,
     no_metric_scoring: bool,
+    no_judge: bool,
     list_models: bool,
     **_: Any,
 ) -> None:
@@ -551,7 +582,8 @@ def bench(
     verbose = (ctx.obj or {}).get("verbose", False)
 
     if judge is None:
-        judge = cfg.get("judge", "gemini-2.5-flash")
+        from .eval_cmd import _resolve_default_judge
+        judge = _resolve_default_judge((ctx.obj or {}).get("config"))
     # Parse --judges (comma-separated) or from config
     judges_list: list[str] | None = None
     if judges:
@@ -584,16 +616,46 @@ def bench(
     if face_weight is None:
         face_weight = cfg_metrics.get("face_weight")
 
+    # Dimension weights: CLI > toml
+    dim_weights_dict: dict[str, float] = {}
+    if dim_weights:
+        dim_weights_dict = json.loads(dim_weights)
+    elif cfg.get("dimension_weights"):
+        dim_weights_dict = dict(cfg["dimension_weights"])
+
+    # Normalize ranges: CLI > toml > default
+    if clip_range is None:
+        toml_clip_range = cfg_metrics.get("clip_range")
+        if toml_clip_range and len(toml_clip_range) == 2:
+            clip_range = tuple(toml_clip_range)  # type: ignore[assignment]
+    if lpips_range is None:
+        toml_lpips_range = cfg_metrics.get("lpips_range")
+        if toml_lpips_range and len(toml_lpips_range) == 2:
+            lpips_range = tuple(toml_lpips_range)  # type: ignore[assignment]
+    if face_range is None:
+        toml_face_range = cfg_metrics.get("face_range")
+        if toml_face_range and len(toml_face_range) == 2:
+            face_range = tuple(toml_face_range)  # type: ignore[assignment]
+
     # Handle --list-models
     if list_models:
         _print_model_list()
         return
 
+    # --no-judge validation
+    if no_judge and no_metrics:
+        console.print(
+            "[bold red]Error:[/bold red] --no-judge and --no-metrics cannot be used together.\n"
+            "  At least one scoring method is required.\n"
+        )
+        sys.exit(2)
+
     # Check API keys for consensus judges
-    if judges_list:
+    if judges_list and not no_judge:
         from ..bench.judge import _parse_judge_string, _PROVIDER_DEFAULTS
 
         help_urls = {
+            "FAL_KEY": "https://fal.ai/dashboard/keys",
             "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
             "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
             "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
@@ -634,7 +696,12 @@ def bench(
             lpips_weight=lpips_weight,
             face_threshold=face_threshold,
             face_weight=face_weight,
+            dim_weights_dict=dim_weights_dict if dim_weights_dict else None,
+            clip_range=clip_range,
+            lpips_range=lpips_range,
+            face_range=face_range,
             no_metric_scoring=no_metric_scoring,
+            no_judge=no_judge,
             verbose=verbose,
         )
         return
@@ -732,8 +799,12 @@ def bench(
                 console.print(f"  [dim]Using demo prompt: \"{prompts}\"[/dim]\n")
 
     if inputs:
-        pipeline, items = _parse_prompts(inputs)
+        pipeline, items = _parse_prompts(inputs, as_image_url=True)
         pipeline = "img2img"
+        # Merge --prompts as instruction for inline --inputs URL
+        if prompts and all("instruction" not in item and "prompt" not in item for item in items):
+            for item in items:
+                item["instruction"] = prompts
     else:
         pipeline, items = _parse_prompts(prompts)  # type: ignore[arg-type]
 
@@ -743,21 +814,23 @@ def bench(
         "https://fal.ai/dashboard/keys",
         "The bench command requires a fal.ai API key for image generation.",
     )
-    from ..bench.judge import _parse_judge_string, _PROVIDER_DEFAULTS
+    if not no_judge:
+        from ..bench.judge import _parse_judge_string, _PROVIDER_DEFAULTS
 
-    provider, _ = _parse_judge_string(judge)
-    env_key = _PROVIDER_DEFAULTS.get(provider, {}).get("env_key")
-    if env_key:
-        help_urls = {
-            "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
-            "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
-            "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
-        }
-        _check_api_key(
-            env_key,
-            help_urls.get(env_key, "your provider dashboard"),
-            f"The {judge} judge requires an API key.",
-        )
+        provider, _ = _parse_judge_string(judge)
+        env_key = _PROVIDER_DEFAULTS.get(provider, {}).get("env_key")
+        if env_key:
+            help_urls = {
+                "FAL_KEY": "https://fal.ai/dashboard/keys",
+                "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
+                "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
+                "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
+            }
+            _check_api_key(
+                env_key,
+                help_urls.get(env_key, "your provider dashboard"),
+                f"The {judge} judge requires an API key.",
+            )
 
     # Parse fal params
     extra_fal_params: dict[str, Any] | None = None
@@ -782,12 +855,15 @@ def bench(
                     if pipeline == "img2img":
                         metrics_list = ["lpips", "sharpness"]
                     else:
-                        metrics_list = ["clip", "sharpness"]
+                        metrics_list = ["clip", "sharpness", "nima"]
                 else:
                     # Sharpness needs no torch — always available
                     metrics_list = ["sharpness"]
             except Exception:
                 metrics_list = ["sharpness"]
+    # --no-judge: ensure at least sharpness is enabled
+    if no_judge and not metrics_list:
+        metrics_list = ["sharpness"]
     if no_metrics:
         metrics_list = []
     if metrics_list:
@@ -809,9 +885,9 @@ def bench(
     cost_est = estimate_run_cost(
         list(models),
         len(items),
-        judge,
-        dimensions_per_item=len(dims) if dims else 2,
-        judges=judges_list,
+        judge if not no_judge else "",
+        dimensions_per_item=len(dims) if dims else (0 if no_judge else 2),
+        judges=judges_list if not no_judge else None,
     )
 
     if not no_terminal:
@@ -835,23 +911,30 @@ def bench(
             sc.metric_configs["clip_score"] = MetricScoringConfig(
                 flag_threshold=clip_threshold if clip_threshold is not None else base.flag_threshold,
                 weight=clip_weight if clip_weight is not None else base.weight,
-                normalize_range=base.normalize_range,
+                normalize_range=tuple(clip_range) if clip_range else base.normalize_range,
             )
         if "lpips" in sc.metric_configs or lpips_threshold is not None or lpips_weight is not None:
             base = sc.metric_configs.get("lpips", MetricScoringConfig(0.40, 0.20, (0.40, 0.95)))
             sc.metric_configs["lpips"] = MetricScoringConfig(
                 flag_threshold=lpips_threshold if lpips_threshold is not None else base.flag_threshold,
                 weight=lpips_weight if lpips_weight is not None else base.weight,
-                normalize_range=base.normalize_range,
+                normalize_range=tuple(lpips_range) if lpips_range else base.normalize_range,
             )
         if "face_similarity" in sc.metric_configs or face_threshold is not None or face_weight is not None:
             base = sc.metric_configs.get("face_similarity", MetricScoringConfig(0.60, 0.20, (0.60, 0.95)))
             sc.metric_configs["face_similarity"] = MetricScoringConfig(
                 flag_threshold=face_threshold if face_threshold is not None else base.flag_threshold,
                 weight=face_weight if face_weight is not None else base.weight,
-                normalize_range=base.normalize_range,
+                normalize_range=tuple(face_range) if face_range else base.normalize_range,
             )
+        if dim_weights_dict:
+            sc.dimension_weights = dim_weights_dict
         scoring_config = sc
+    elif dim_weights_dict:
+        # Dimension weights without metric scoring
+        from ..bench.types import ScoringConfig
+
+        scoring_config = ScoringConfig(dimension_weights=dim_weights_dict)
 
     # Run bench
     from ..bench.runner import run_bench
@@ -875,6 +958,7 @@ def bench(
             timeout=timeout,
             name=name,
             scoring_config=scoring_config,
+            no_judge=no_judge,
             verbose=verbose,
         )
     except EvalyticError as exc:

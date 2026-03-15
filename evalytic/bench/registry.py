@@ -45,24 +45,57 @@ class UnknownModelError(ValidationError):
 # ---------------------------------------------------------------------------
 
 MODEL_REGISTRY: dict[str, ModelEntry] = {
-    # text2img
-    "flux-schnell": ModelEntry("flux-schnell", "fal-ai/flux/schnell", "text2img", 0.003),
-    "flux-dev": ModelEntry("flux-dev", "fal-ai/flux/dev", "text2img", 0.025),
+    # ---- text2img: Leaderboard models (33) ----
+    # Google / Gemini (Nano Banana)
+    "nano-banana-2": ModelEntry("nano-banana-2", "fal-ai/nano-banana-2", "text2img", 0.08),
+    "nano-banana-pro": ModelEntry("nano-banana-pro", "fal-ai/nano-banana-pro", "text2img", 0.15),
+    "nano-banana": ModelEntry("nano-banana", "fal-ai/nano-banana", "text2img", 0.039),
+    # Google / Imagen
+    "imagen-4-ultra": ModelEntry("imagen-4-ultra", "fal-ai/imagen4/preview/ultra", "text2img", 0.06),
+    "imagen-4": ModelEntry("imagen-4", "fal-ai/imagen4/preview", "text2img", 0.05),
+    "imagen-4-fast": ModelEntry("imagen-4-fast", "fal-ai/imagen4/preview/fast", "text2img", 0.02),
+    "imagen-3": ModelEntry("imagen-3", "fal-ai/imagen3", "text2img", 0.05),
+    # BFL / FLUX
+    "flux-2-max": ModelEntry("flux-2-max", "fal-ai/flux-2-max", "text2img", 0.07),
+    "flux-2-flex": ModelEntry("flux-2-flex", "fal-ai/flux-2-flex", "text2img", 0.05),
+    "flux-2-pro": ModelEntry("flux-2-pro", "fal-ai/flux-2-pro", "text2img", 0.03),
+    "flux-2-dev": ModelEntry("flux-2-dev", "fal-ai/flux-2", "text2img", 0.012),
     "flux-pro": ModelEntry("flux-pro", "fal-ai/flux-pro/v1.1", "text2img", 0.04),
-    "flux-2-dev": ModelEntry("flux-2-dev", "fal-ai/flux-2/dev", "text2img", 0.025),
-    "flux-2-pro": ModelEntry("flux-2-pro", "fal-ai/flux-2/pro", "text2img", 0.05),
+    "flux-schnell": ModelEntry("flux-schnell", "fal-ai/flux/schnell", "text2img", 0.003),
+    # Reve
+    "reve": ModelEntry("reve", "fal-ai/reve/text-to-image", "text2img", 0.04),
+    # xAI
+    "grok-imagine": ModelEntry("grok-imagine", "xai/grok-imagine-image", "text2img", 0.02),
+    # Tencent / Hunyuan
+    "hunyuan-3": ModelEntry("hunyuan-3", "fal-ai/hunyuan-image/v3/text-to-image", "text2img", 0.10),
+    # ByteDance / Seedream
+    "seedream-v4.5": ModelEntry("seedream-v4.5", "fal-ai/bytedance/seedream/v4.5/text-to-image", "text2img", 0.04),
+    "seedream-v4": ModelEntry("seedream-v4", "fal-ai/bytedance/seedream/v4/text-to-image", "text2img", 0.03),
+    "seedream": ModelEntry("seedream", "fal-ai/bytedance/seedream/v5/lite/text-to-image", "text2img", 0.035),
+    # Alibaba
+    "qwen-image-2": ModelEntry("qwen-image-2", "fal-ai/qwen-image-2/text-to-image", "text2img", 0.035),
+    "wan-2.6": ModelEntry("wan-2.6", "wan/v2.6/text-to-image", "text2img", 0.03),
+    "qwen-image": ModelEntry("qwen-image", "fal-ai/qwen-image", "text2img", 0.02),
+    # Recraft
+    "recraft-v4": ModelEntry("recraft-v4", "fal-ai/recraft/v4/text-to-image", "text2img", 0.04),
+    "recraft-v3": ModelEntry("recraft-v3", "fal-ai/recraft/v3/text-to-image", "text2img", 0.04),
+    # Ideogram
+    "ideogram-v3": ModelEntry("ideogram-v3", "fal-ai/ideogram/v3", "text2img", 0.03),
+    # OpenAI
+    "gpt-image-1": ModelEntry("gpt-image-1", "fal-ai/gpt-image-1/text-to-image", "text2img", 0.042),
+    "gpt-image-1-mini": ModelEntry("gpt-image-1-mini", "fal-ai/gpt-image-1-mini", "text2img", 0.011),
+    # Other
+    "z-image-turbo": ModelEntry("z-image-turbo", "fal-ai/z-image/turbo", "text2img", 0.005),
+    "glm-image": ModelEntry("glm-image", "fal-ai/glm-image", "text2img", 0.05),
+    "hidream": ModelEntry("hidream", "fal-ai/hidream-i1-full", "text2img", 0.05),
+    "sd35-large": ModelEntry("sd35-large", "fal-ai/stable-diffusion-v35-large", "text2img", 0.065),
+    "bria-fibo": ModelEntry("bria-fibo", "bria/fibo/generate", "text2img", 0.04),
+    "imagineart": ModelEntry("imagineart", "imagineart/imagineart-1.5-preview/text-to-image", "text2img", 0.03),
+    # ---- text2img: Legacy aliases (not in leaderboard) ----
+    "flux-dev": ModelEntry("flux-dev", "fal-ai/flux/dev", "text2img", 0.025),
     "sdxl": ModelEntry("sdxl", "fal-ai/fast-sdxl", "text2img", 0.01),
     "sd3": ModelEntry("sd3", "fal-ai/stable-diffusion-v3-medium", "text2img", 0.035),
-    "recraft-v3": ModelEntry("recraft-v3", "fal-ai/recraft-v3", "text2img", 0.04),
-    "imagen-3": ModelEntry("imagen-3", "fal-ai/imagen3", "text2img", 0.05),
-    "ideogram-v3": ModelEntry("ideogram-v3", "fal-ai/ideogram/v3", "text2img", 0.03),
-    "nano-banana-pro": ModelEntry("nano-banana-pro", "fal-ai/nano-banana-pro", "text2img", 0.15),
     "recraft-v4-pro": ModelEntry("recraft-v4-pro", "fal-ai/recraft/v4/pro/text-to-image", "text2img", 0.25),
-    "grok-imagine": ModelEntry("grok-imagine", "xai/grok-imagine-image", "text2img", 0.02),
-    "flux-2-flex": ModelEntry("flux-2-flex", "fal-ai/flux-2-flex", "text2img", 0.05),
-    "hidream": ModelEntry("hidream", "fal-ai/hidream-i1-full", "text2img", 0.05),
-    "seedream": ModelEntry("seedream", "fal-ai/bytedance/seedream/v5/lite/text-to-image", "text2img", 0.035),
-    "imagineart": ModelEntry("imagineart", "imagineart/imagineart-1.5-preview/text-to-image", "text2img", 0.03),
     # img2img
     "flux-dev-i2i": ModelEntry("flux-dev-i2i", "fal-ai/flux/dev/image-to-image", "img2img", 0.03),
     "flux-kontext": ModelEntry("flux-kontext", "fal-ai/flux-pro/kontext", "img2img", 0.04),

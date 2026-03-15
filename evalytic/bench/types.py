@@ -49,6 +49,7 @@ class ScoringConfig:
     """Configuration for metric-weighted overall scoring."""
 
     metric_configs: dict[str, MetricScoringConfig] = field(default_factory=dict)
+    dimension_weights: dict[str, float] = field(default_factory=dict)
 
     @staticmethod
     def default() -> ScoringConfig:
@@ -70,11 +71,53 @@ class ScoringConfig:
                     weight=0.20,
                     normalize_range=(0.60, 0.95),
                 ),
+                "nima_score": MetricScoringConfig(
+                    flag_threshold=0.3,
+                    weight=0.15,
+                    normalize_range=(0.3, 0.8),
+                ),
+                "ocr_accuracy": MetricScoringConfig(
+                    flag_threshold=0.0,
+                    weight=0.10,
+                    normalize_range=(0.0, 1.0),
+                ),
             }
         )
 
+    def resolve_dimension_weights(self, dimensions: list[str]) -> dict[str, float]:
+        """Resolve dimension weights: specified weights are used, unspecified get equal share of remainder, total normalized to 1.0."""
+        if not self.dimension_weights:
+            n = len(dimensions)
+            return {d: 1.0 / n for d in dimensions} if n > 0 else {}
+
+        # Start with specified weights
+        weights: dict[str, float] = {}
+        specified_total = 0.0
+        unspecified: list[str] = []
+
+        for d in dimensions:
+            if d in self.dimension_weights:
+                weights[d] = self.dimension_weights[d]
+                specified_total += self.dimension_weights[d]
+            else:
+                unspecified.append(d)
+
+        # Distribute remaining weight equally among unspecified dimensions
+        if unspecified:
+            remaining = max(0.0, 1.0 - specified_total)
+            per_dim = remaining / len(unspecified)
+            for d in unspecified:
+                weights[d] = per_dim
+
+        # Normalize to sum to 1.0
+        total = sum(weights.values())
+        if total > 0:
+            weights = {d: w / total for d, w in weights.items()}
+
+        return weights
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             name: {
                 "flag_threshold": cfg.flag_threshold,
                 "weight": cfg.weight,
@@ -82,6 +125,9 @@ class ScoringConfig:
             }
             for name, cfg in self.metric_configs.items()
         }
+        if self.dimension_weights:
+            d["dimension_weights"] = dict(self.dimension_weights)
+        return d
 
 
 @dataclass
@@ -138,7 +184,7 @@ class DimensionResult:
 class MetricResult:
     """Local metric result for one image (CLIP / LPIPS / sharpness)."""
 
-    metric: str  # "clip_score", "lpips", "face_similarity", or "sharpness"
+    metric: str  # "clip_score", "lpips", "face_similarity", "sharpness", "nima_score", "ocr_accuracy", or "aesthetic_score"
     value: float
     description: str = ""
 
@@ -163,9 +209,12 @@ class ImageResult:
 
     @property
     def overall_score(self) -> float:
-        if not self.scores:
-            return 0.0
-        return sum(s.score for s in self.scores) / len(self.scores)
+        if self.scores:
+            return sum(s.score for s in self.scores) / len(self.scores)
+        # Metrics-only mode: compute from normalized metric values
+        if self.metrics:
+            return sum(m.value for m in self.metrics) / len(self.metrics)
+        return 0.0
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {

@@ -9,6 +9,7 @@ Lightweight metrics (sharpness) run with only numpy+PIL — no torch required.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,22 @@ try:
     import lpips as _lpips_lib  # type: ignore[no-redef]
 
     METRICS_AVAILABLE = True
+except ImportError:
+    pass
+
+NIMA_AVAILABLE = False
+_pyiqa: Any = None
+try:
+    import pyiqa as _pyiqa  # type: ignore[no-redef]
+    NIMA_AVAILABLE = True
+except ImportError:
+    pass
+
+OCR_AVAILABLE = False
+_pytesseract: Any = None
+try:
+    import pytesseract as _pytesseract  # type: ignore[no-redef]
+    OCR_AVAILABLE = True
 except ImportError:
     pass
 
@@ -197,6 +214,190 @@ class FaceScorer:
 
 
 # ---------------------------------------------------------------------------
+# Aesthetic scorer (LAION CLIP-MLP)
+# ---------------------------------------------------------------------------
+
+
+class AestheticScorer:
+    """Aesthetic quality predictor — MLP on CLIP ViT-L/14 embeddings.
+
+    Uses the improved-aesthetic-predictor (SAC+logos+AVA) trained on
+    ``openai/clip-vit-large-patch14`` embeddings.  Normalises the raw
+    1-10 AVA score to 0-1.
+
+    Optionally accepts a :class:`CLIPScorer` to reuse its loaded model
+    instead of loading a second copy.
+
+    Requires ``pip install evalytic[metrics]`` (torch + transformers).
+    """
+
+    _HF_REPO = "camenduru/improved-aesthetic-predictor"
+    _HF_FILE = "sac+logos+ava1-l14-linearMSE.pth"
+
+    def __init__(
+        self,
+        clip_scorer: CLIPScorer | None = None,
+        cache_dir: str | None = None,
+    ) -> None:
+        if not METRICS_AVAILABLE:
+            raise RuntimeError(
+                "Aesthetic scoring requires evalytic[metrics]. "
+                "Install with: pip install evalytic[metrics]"
+            )
+        self._clip_scorer = clip_scorer
+        self._cache_dir = str(Path(cache_dir or _DEFAULT_CACHE_DIR).expanduser())
+        self._model: Any = None
+        self._processor: Any = None
+        self._mlp: Any = None
+
+    def _load(self) -> None:
+        if self._mlp is not None:
+            return
+
+        # Reuse CLIP model from CLIPScorer if available
+        if self._clip_scorer is not None:
+            self._clip_scorer._load()
+            self._model = self._clip_scorer._model
+            self._processor = self._clip_scorer._processor
+        else:
+            self._model = _transformers.CLIPModel.from_pretrained(
+                _DEFAULT_CLIP_MODEL, cache_dir=self._cache_dir,
+            )
+            self._processor = _transformers.CLIPProcessor.from_pretrained(
+                _DEFAULT_CLIP_MODEL, cache_dir=self._cache_dir,
+            )
+            self._model.eval()
+
+        # MLP: 768 → 1024 → 128 → 64 → 16 → 1 (no activations)
+        self._mlp = _torch.nn.Sequential(
+            _torch.nn.Linear(768, 1024),
+            _torch.nn.Dropout(0.2),
+            _torch.nn.Linear(1024, 128),
+            _torch.nn.Dropout(0.2),
+            _torch.nn.Linear(128, 64),
+            _torch.nn.Dropout(0.1),
+            _torch.nn.Linear(64, 16),
+            _torch.nn.Linear(16, 1),
+        )
+
+        # Download weights from HuggingFace
+        from huggingface_hub import hf_hub_download  # available via transformers
+
+        weights_path = hf_hub_download(
+            self._HF_REPO, self._HF_FILE, cache_dir=self._cache_dir,
+        )
+        state_dict = _torch.load(weights_path, map_location="cpu", weights_only=True)
+        # Remap keys: "layers.X.weight" → "X.weight"
+        remapped = {k.replace("layers.", ""): v for k, v in state_dict.items()}
+        self._mlp.load_state_dict(remapped)
+        self._mlp.eval()
+
+    def score(self, image_path: str) -> float:
+        """Return aesthetic score in [0.0, 1.0].  Higher = more aesthetic."""
+        self._load()
+        from PIL import Image
+
+        img = Image.open(image_path).convert("RGB")
+        inputs = self._processor(images=img, return_tensors="pt")
+        with _torch.no_grad():
+            emb = self._model.get_image_features(**inputs)
+            if not isinstance(emb, _torch.Tensor):
+                emb = emb.pooler_output if hasattr(emb, "pooler_output") else emb[1]
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+            raw = self._mlp(emb).item()
+
+        # AVA scores 1-10 → normalise to 0-1
+        return round(max(0.0, min(1.0, (raw - 1.0) / 9.0)), 4)
+
+
+# ---------------------------------------------------------------------------
+# NIMA scorer (pyiqa) — replaces AestheticScorer
+# ---------------------------------------------------------------------------
+
+
+class NimaScorer:
+    """Neural Image Assessment (NIMA) — aesthetic quality predictor.
+
+    Uses the NIMA model from pyiqa, trained on the AVA dataset of human
+    aesthetic ratings.  Returns a normalised 0-1 score (raw NIMA is 1-10).
+
+    Requires ``pip install pyiqa``.
+    """
+
+    def __init__(self) -> None:
+        if not NIMA_AVAILABLE:
+            raise RuntimeError(
+                "NIMA scoring requires pyiqa. "
+                "Install with: pip install pyiqa"
+            )
+        self._model: Any = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        self._model = _pyiqa.create_metric("nima", device="cpu")
+
+    def score(self, image_path: str) -> float:
+        """Return NIMA aesthetic score in [0.0, 1.0].  Higher = more aesthetic."""
+        self._load()
+        raw = self._model(image_path).item()
+        # NIMA outputs 1-10, normalise to 0-1
+        return round(max(0.0, min(1.0, (raw - 1.0) / 9.0)), 4)
+
+
+# ---------------------------------------------------------------------------
+# OCR scorer (pytesseract) — text accuracy in generated images
+# ---------------------------------------------------------------------------
+
+
+class OCRScorer:
+    """OCR accuracy scorer — compares expected text with OCR-extracted text.
+
+    Uses pytesseract to extract text from the generated image and compares
+    it against expected text using SequenceMatcher ratio.
+
+    Returns accuracy 0.0-1.0, or None if no expected text is provided.
+
+    Requires ``pip install pytesseract`` (and Tesseract binary installed).
+    """
+
+    def __init__(self) -> None:
+        if not OCR_AVAILABLE:
+            raise RuntimeError(
+                "OCR scoring requires pytesseract. "
+                "Install with: pip install pytesseract"
+            )
+
+    def score(self, image_path: str, expected_text: str) -> float | None:
+        """Return OCR accuracy in [0.0, 1.0] or None if no expected text."""
+        if not expected_text:
+            return None
+        try:
+            from difflib import SequenceMatcher
+
+            from PIL import Image
+
+            img = Image.open(image_path)
+            extracted = _pytesseract.image_to_string(img).strip()
+            if not extracted:
+                return 0.0
+            ratio = SequenceMatcher(None, expected_text.lower(), extracted.lower()).ratio()
+            return round(max(0.0, min(1.0, ratio)), 4)
+        except Exception:
+            return None
+
+
+def _extract_expected_text(prompt: str) -> str:
+    """Extract quoted strings from a prompt as expected text for OCR.
+
+    Looks for text inside single or double quotes, e.g.:
+    'A sign that says "Hello World"' -> 'Hello World'
+    """
+    matches = re.findall(r"""['"]([^'"]+)['"]""", prompt)
+    return " ".join(matches) if matches else ""
+
+
+# ---------------------------------------------------------------------------
 # Sharpness scorer (Variance of Laplacian) — no torch required
 # ---------------------------------------------------------------------------
 
@@ -282,6 +483,9 @@ def compute_metrics(
     * ``lpips`` — only for img2img (needs an input image)
     * ``face`` — only for img2img (needs an input image with faces)
     * ``sharpness`` — always available (no torch, uses numpy+PIL)
+    * ``aesthetic`` — (deprecated, alias for ``nima``) LAION aesthetic MLP on CLIP embeddings
+    * ``nima`` — NIMA aesthetic quality predictor (requires pyiqa)
+    * ``ocr`` — OCR text accuracy for prompts with quoted text (requires pytesseract)
     """
     from .types import MetricResult
 
@@ -289,6 +493,9 @@ def compute_metrics(
     lpips_scorer: LPIPSScorer | None = None
     face_scorer: FaceScorer | None = None
     sharpness_scorer: SharpnessScorer | None = None
+    aesthetic_scorer: AestheticScorer | None = None
+    nima_scorer: NimaScorer | None = None
+    ocr_scorer: OCRScorer | None = None
 
     if "clip" in metric_types and pipeline == "text2img":
         clip_scorer = CLIPScorer(cache_dir=cache_dir)
@@ -298,17 +505,33 @@ def compute_metrics(
         face_scorer = FaceScorer(cache_dir=cache_dir)
     if "sharpness" in metric_types:
         sharpness_scorer = SharpnessScorer()
+    if "aesthetic" in metric_types and "nima" not in metric_types:
+        # "aesthetic" is deprecated alias — use NimaScorer if available, else fall back
+        if NIMA_AVAILABLE:
+            nima_scorer = NimaScorer()
+        else:
+            aesthetic_scorer = AestheticScorer(clip_scorer=clip_scorer, cache_dir=cache_dir)
+    if "nima" in metric_types:
+        nima_scorer = NimaScorer()
+    if "ocr" in metric_types:
+        ocr_scorer = OCRScorer()
 
-    if clip_scorer is None and lpips_scorer is None and face_scorer is None and sharpness_scorer is None:
+    if clip_scorer is None and lpips_scorer is None and face_scorer is None and sharpness_scorer is None and aesthetic_scorer is None and nima_scorer is None and ocr_scorer is None:
         return
 
     # Build a prompt lookup: item_id -> prompt text
     prompt_map: dict[str, str] = {}
     input_map: dict[str, str] = {}
+    expected_text_map: dict[str, str] = {}
     for p in prompts:
         item_id = p.get("item_id", "")
         prompt_map[item_id] = p.get("prompt", "")
         input_map[item_id] = p.get("image_url", "")
+        # expected_text can be a string or list of strings
+        et = p.get("expected_text", "")
+        if isinstance(et, list):
+            et = " ".join(et)
+        expected_text_map[item_id] = et
 
     # Resolve input images (download URLs to local files for LPIPS/face)
     resolved_inputs: dict[str, str] = {}
@@ -385,6 +608,49 @@ def compute_metrics(
                 except Exception:
                     pass  # skip on failure
 
+            if aesthetic_scorer:
+                try:
+                    val = aesthetic_scorer.score(img_result.image_local)
+                    img_result.metrics.append(
+                        MetricResult(
+                            metric="aesthetic_score",
+                            value=val,
+                            description="Aesthetic quality (LAION MLP on CLIP, 0-1)",
+                        )
+                    )
+                except Exception:
+                    pass  # skip on failure
+
+            if nima_scorer:
+                try:
+                    val = nima_scorer.score(img_result.image_local)
+                    img_result.metrics.append(
+                        MetricResult(
+                            metric="nima_score",
+                            value=val,
+                            description="NIMA aesthetic quality (AVA-trained, 0-1)",
+                        )
+                    )
+                except Exception:
+                    pass  # skip on failure
+
+            if ocr_scorer:
+                try:
+                    # Prefer explicit expected_text from prompt metadata, fall back to regex extraction
+                    expected = expected_text_map.get(item.item_id, "") or _extract_expected_text(prompt_text)
+                    if expected:
+                        val = ocr_scorer.score(img_result.image_local, expected)
+                        if val is not None:
+                            img_result.metrics.append(
+                                MetricResult(
+                                    metric="ocr_accuracy",
+                                    value=val,
+                                    description="OCR text accuracy (SequenceMatcher ratio, 0-1)",
+                                )
+                            )
+                except Exception:
+                    pass  # skip on failure
+
 
 # ---------------------------------------------------------------------------
 # Metric scoring: normalization + threshold
@@ -408,7 +674,7 @@ def check_metric_threshold(
     from .types import MetricFlag
 
     if value <= config.flag_threshold:
-        label = {"clip_score": "CLIP score", "lpips": "LPIPS similarity", "face_similarity": "Face similarity", "sharpness": "Sharpness"}.get(metric, metric)
+        label = {"clip_score": "CLIP score", "lpips": "LPIPS similarity", "face_similarity": "Face similarity", "sharpness": "Sharpness", "aesthetic_score": "Aesthetic score", "nima_score": "NIMA score", "ocr_accuracy": "OCR accuracy"}.get(metric, metric)
         return MetricFlag(
             metric=metric,
             value=value,

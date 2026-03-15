@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +14,8 @@ import httpx
 
 from ..exceptions import GenerationError
 from .registry import ModelEntry
+
+logger = logging.getLogger("evalytic")
 
 
 @dataclass
@@ -27,6 +30,7 @@ class GenerationResult:
     status: str = "success"  # "success" | "failed"
     error: str = ""
     local_path: str = ""
+    retried: bool = False  # True if this result came from a retry attempt
 
 
 def generate_single(
@@ -35,9 +39,11 @@ def generate_single(
     item_id: str,
     cache_dir: Path | None = None,
     timeout: int = 300,
+    max_retries: int = 1,
 ) -> GenerationResult:
     """Generate one image via ``fal_client.subscribe()``.
 
+    On failure, retries up to *max_retries* times with a brief pause.
     Downloads the result to *cache_dir* if provided.
     """
     try:
@@ -48,45 +54,68 @@ def generate_single(
             "Install with: pip install evalytic[generation]"
         ) from None
 
-    start = time.monotonic()
-    try:
-        result = fal_client.subscribe(
-            entry.endpoint,
-            arguments=arguments,
-            client_timeout=timeout,
-        )
+    last_error = ""
+    total_start = time.monotonic()
 
-        # fal.ai models return images in different shapes
-        if "images" in result and result["images"]:
-            image_url = result["images"][0]["url"]
-        elif "image" in result and isinstance(result["image"], dict):
-            image_url = result["image"]["url"]
-        else:
-            raise GenerationError(f"Unexpected response shape: {list(result.keys())}")
+    for attempt in range(1 + max_retries):
+        start = time.monotonic()
+        try:
+            result = fal_client.subscribe(
+                entry.endpoint,
+                arguments=arguments,
+                client_timeout=timeout,
+            )
 
-        elapsed_ms = int((time.monotonic() - start) * 1000)
+            # fal.ai models return images in different shapes
+            if "images" in result and result["images"]:
+                image_url = result["images"][0]["url"]
+            elif "image" in result and isinstance(result["image"], dict):
+                image_url = result["image"]["url"]
+            else:
+                raise GenerationError(f"Unexpected response shape: {list(result.keys())}")
 
-        local_path = ""
-        if cache_dir is not None:
-            local_path = _download_image(image_url, cache_dir, entry.short_name, item_id)
+            elapsed_ms = int((time.monotonic() - total_start) * 1000)
 
-        return GenerationResult(
-            image_url=image_url,
-            generation_time_ms=elapsed_ms,
-            generation_cost_usd=entry.cost_per_image,
-            model=entry.short_name,
-            item_id=item_id,
-            local_path=local_path,
-        )
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        return GenerationResult(
-            model=entry.short_name,
-            item_id=item_id,
-            status="failed",
-            error=str(exc),
-            generation_time_ms=elapsed_ms,
-        )
+            local_path = ""
+            if cache_dir is not None:
+                local_path = _download_image(image_url, cache_dir, entry.short_name, item_id)
+
+            return GenerationResult(
+                image_url=image_url,
+                generation_time_ms=elapsed_ms,
+                generation_cost_usd=entry.cost_per_image,
+                model=entry.short_name,
+                item_id=item_id,
+                local_path=local_path,
+                retried=attempt > 0,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            if attempt < max_retries:
+                logger.warning(
+                    "[%s/%s] attempt %d failed (%ds): %s — retrying",
+                    entry.short_name, item_id, attempt + 1,
+                    elapsed_ms // 1000, last_error[:120],
+                )
+                time.sleep(2)
+            else:
+                logger.error(
+                    "[%s/%s] failed after %d attempt(s) (%ds): %s",
+                    entry.short_name, item_id, attempt + 1,
+                    int((time.monotonic() - total_start)),
+                    last_error[:200],
+                )
+
+    total_elapsed_ms = int((time.monotonic() - total_start) * 1000)
+    return GenerationResult(
+        model=entry.short_name,
+        item_id=item_id,
+        status="failed",
+        error=last_error,
+        generation_time_ms=total_elapsed_ms,
+        retried=max_retries > 0,
+    )
 
 
 def generate_batch(

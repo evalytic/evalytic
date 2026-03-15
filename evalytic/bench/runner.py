@@ -48,10 +48,11 @@ def run_bench(
     image_size: str | None = None,
     fal_params: dict[str, Any] | None = None,
     cache_dir: str | None = None,
-    timeout: int = 300,
+    timeout: int = 600,
     name: str | None = None,
     scoring_config: ScoringConfig | None = None,
     judge_url: str | None = None,
+    no_judge: bool = False,
     on_generation_progress: Any = None,
     on_scoring_progress: Any = None,
     verbose: bool = False,
@@ -192,8 +193,12 @@ def run_bench(
                 model_name = futures[future]
                 result = future.result()
                 all_gen_results[model_name].append(result)
-                _log(f"Generated {model_name}/{result.item_id}: {result.status}"
-                     + (f" ({result.error})" if result.error else f" ({result.generation_time_ms}ms)"))
+                retry_tag = " [retried]" if getattr(result, "retried", False) else ""
+                time_str = f"{result.generation_time_ms / 1000:.1f}s"
+                if result.status == "failed":
+                    _log(f"Generated {model_name}/{result.item_id}: FAILED ({time_str}){retry_tag} — {result.error[:120]}")
+                else:
+                    _log(f"Generated {model_name}/{result.item_id}: OK ({time_str}){retry_tag}")
                 if result.status == "failed" and result.error:
                     errors.append(RunError(
                         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -212,57 +217,17 @@ def run_bench(
     judge_request_count = 0
     is_consensus = bool(judges and len(judges) >= 2)
 
-    # Collect scorable (gen, item) pairs
-    score_tasks: list[tuple[GenerationResult, dict[str, Any]]] = []
-    for item in items:
-        for entry in entries:
-            gen = _find_gen_result(all_gen_results[entry.short_name], item["item_id"])
-            if gen and gen.status != "failed":
-                score_tasks.append((gen, item))
-
-    # Create judge instance (single or consensus)
-    if is_consensus:
-        scorer: Judge | ConsensusJudge = ConsensusJudge(judges, base_url=judge_url)
-    else:
-        scorer = Judge(judge=judge, base_url=judge_url)
-
-    # Score in parallel
     score_results: dict[tuple[str, str], list[DimensionResult]] = {}
-    try:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {
-                pool.submit(
-                    _score_single, scorer, gen, item, dimensions,
-                ): (gen.model, gen.item_id)
-                for gen, item in score_tasks
-            }
-            for future in as_completed(futures):
-                model_name, item_id = futures[future]
-                try:
-                    _, _, dim_results = future.result()
-                    score_results[(model_name, item_id)] = dim_results
-                    judge_request_count += len(dimensions)
-                    _log(f"Scored {model_name}/{item_id}: "
-                         + ", ".join(f"{d.dimension}={d.score}" for d in dim_results))
-                except Exception as exc:
-                    score_results[(model_name, item_id)] = []
-                    _log(f"Scoring failed {model_name}/{item_id}: {exc}")
-                    errors.append(RunError(
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        level="error",
-                        phase="scoring",
-                        model=model_name,
-                        item_id=item_id,
-                        dimension="",
-                        message=str(exc),
-                    ))
-                    if verbose:
-                        import traceback
-                        traceback.print_exc(file=sys.stderr)
-                if on_scoring_progress:
-                    on_scoring_progress(model_name, item_id)
 
-        # Build BenchItems from results
+    if no_judge:
+        # Skip VLM judge entirely — metrics-only mode
+        dimensions = []
+        judge = ""
+        judges = None
+        is_consensus = False
+        _log("No-judge mode: skipping VLM scoring")
+
+        # Build BenchItems without scores
         for item in items:
             bench_item = BenchItem(
                 item_id=item["item_id"],
@@ -288,11 +253,90 @@ def run_bench(
                         image_local=gen.local_path,
                         generation_time_ms=gen.generation_time_ms,
                         generation_cost_usd=gen.generation_cost_usd,
-                        scores=score_results.get((model_name, gen.item_id), []),
+                        scores=[],
                     )
             bench_items.append(bench_item)
-    finally:
-        scorer.close()
+    else:
+        # Collect scorable (gen, item) pairs
+        score_tasks: list[tuple[GenerationResult, dict[str, Any]]] = []
+        for item in items:
+            for entry in entries:
+                gen = _find_gen_result(all_gen_results[entry.short_name], item["item_id"])
+                if gen and gen.status != "failed":
+                    score_tasks.append((gen, item))
+
+        # Create judge instance (single or consensus)
+        if is_consensus:
+            scorer: Judge | ConsensusJudge = ConsensusJudge(judges, base_url=judge_url)
+        else:
+            scorer = Judge(judge=judge, base_url=judge_url)
+
+        # Score in parallel
+        try:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {
+                    pool.submit(
+                        _score_single, scorer, gen, item, dimensions,
+                    ): (gen.model, gen.item_id)
+                    for gen, item in score_tasks
+                }
+                for future in as_completed(futures):
+                    model_name, item_id = futures[future]
+                    try:
+                        _, _, dim_results = future.result()
+                        score_results[(model_name, item_id)] = dim_results
+                        judge_request_count += len(dimensions)
+                        _log(f"Scored {model_name}/{item_id}: "
+                             + ", ".join(f"{d.dimension}={d.score}" for d in dim_results))
+                    except Exception as exc:
+                        score_results[(model_name, item_id)] = []
+                        _log(f"Scoring failed {model_name}/{item_id}: {exc}")
+                        errors.append(RunError(
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            level="error",
+                            phase="scoring",
+                            model=model_name,
+                            item_id=item_id,
+                            dimension="",
+                            message=str(exc),
+                        ))
+                        if verbose:
+                            import traceback
+                            traceback.print_exc(file=sys.stderr)
+                    if on_scoring_progress:
+                        on_scoring_progress(model_name, item_id)
+
+            # Build BenchItems from results
+            for item in items:
+                bench_item = BenchItem(
+                    item_id=item["item_id"],
+                    prompt=item.get("prompt", ""),
+                    image_url=item.get("image_url", ""),
+                    instruction=item.get("instruction", ""),
+                    tags=item.get("tags", []),
+                )
+                for entry in entries:
+                    model_name = entry.short_name
+                    gen = _find_gen_result(all_gen_results[model_name], item["item_id"])
+                    if gen is None or gen.status == "failed":
+                        bench_item.results[model_name] = ImageResult(
+                            model=model_name,
+                            image_url="",
+                            status="failed",
+                            error=gen.error if gen else "Generation result not found",
+                        )
+                    else:
+                        bench_item.results[model_name] = ImageResult(
+                            model=model_name,
+                            image_url=gen.image_url,
+                            image_local=gen.local_path,
+                            generation_time_ms=gen.generation_time_ms,
+                            generation_cost_usd=gen.generation_cost_usd,
+                            scores=score_results.get((model_name, gen.item_id), []),
+                        )
+                bench_items.append(bench_item)
+        finally:
+            scorer.close()
 
     # ---- METRICS (optional) ----
     metrics = metrics or []
@@ -384,7 +428,7 @@ def run_bench(
         models=models,
         judge=judge,
         pipeline=pipeline,
-        judges=judges or [judge],
+        judges=judges or ([judge] if judge else []),
         consensus_mode=is_consensus,
         dimensions=dimensions,
         items=bench_items,
@@ -408,6 +452,7 @@ def run_bench(
             "image_size": image_size,
             "concurrency": concurrency,
             **({"scoring_config": effective_scoring_config.to_dict()} if effective_scoring_config else {}),
+            **({"dimension_weights": dict(effective_scoring_config.dimension_weights)} if effective_scoring_config and effective_scoring_config.dimension_weights else {}),
         },
         metadata={
             "evalytic_version": evalytic.__version__,
@@ -651,8 +696,12 @@ def _aggregate_model_summary(
         m: round(sum(vals) / len(vals), 4) if vals else 0.0
         for m, vals in metric_scores.items()
     }
-    all_avgs = [v for v in dim_avgs.values() if v > 0]
-    vlm_avg = round(sum(all_avgs) / len(all_avgs), 2) if all_avgs else 0.0
+    if scoring_config and scoring_config.dimension_weights:
+        weights = scoring_config.resolve_dimension_weights(dimensions)
+        vlm_avg = round(sum(dim_avgs.get(d, 0) * weights.get(d, 0) for d in dimensions), 2)
+    else:
+        all_avgs = [v for v in dim_avgs.values() if v > 0]
+        vlm_avg = round(sum(all_avgs) / len(all_avgs), 2) if all_avgs else 0.0
 
     # Weighted scoring: incorporate metrics into overall
     metric_flags: dict[str, str] = {}
@@ -683,12 +732,24 @@ def _aggregate_model_summary(
         if total_weight > 1.0:
             total_weight = 1.0
 
-        if total_weight > 0 and vlm_avg > 0:
-            weighted_overall = round(
-                vlm_avg * (1.0 - total_weight) + weighted_sum, 2,
-            )
+        if total_weight > 0:
+            if vlm_avg > 0:
+                weighted_overall = round(
+                    vlm_avg * (1.0 - total_weight) + weighted_sum, 2,
+                )
+            else:
+                # Metrics-only: use weighted metrics as overall (scale to 0-5)
+                weighted_overall = round(weighted_sum / total_weight, 2) if total_weight > 0 else 0.0
 
     overall = weighted_overall if weighted_overall is not None else vlm_avg
+
+    # Metrics-only fallback: when no VLM scores, use raw metric average as overall
+    if overall == 0.0 and metric_avgs and not dimensions:
+        # Scale normalized metrics to 0-5 range for consistency
+        vals = list(metric_avgs.values())
+        raw_avg = sum(vals) / len(vals)
+        # Metrics like sharpness are already 0-1, scale to 0-5
+        overall = round(raw_avg * 5.0, 2) if raw_avg <= 1.0 else round(raw_avg, 2)
 
     # Efficiency metrics
     cost_per_img = round(total_cost / count, 4) if count > 0 else 0.0

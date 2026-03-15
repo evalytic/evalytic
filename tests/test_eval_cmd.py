@@ -47,14 +47,30 @@ class TestEvalValidation:
         assert result.exit_code == 2
         assert "requires --input-image" in result.output
 
-    def test_missing_gemini_key_exits_2(self, runner: CliRunner) -> None:
-        env = {k: v for k, v in __import__("os").environ.items() if k != "GEMINI_API_KEY"}
+    def test_missing_judge_key_exits_2(self, runner: CliRunner) -> None:
+        """Without GEMINI_API_KEY or FAL_KEY, eval should fail with missing key error."""
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("GEMINI_API_KEY", "FAL_KEY")}
         with patch.dict("os.environ", env, clear=True), \
              patch("evalytic.cli.main.load_dotenv"), \
              patch("evalytic.config.apply_keys"):
             result = runner.invoke(cli, ["eval", "--image", "photo.jpg", "-d", "visual_quality"])
         assert result.exit_code == 2
         assert "GEMINI_API_KEY" in result.output
+
+    def test_fal_key_auto_selects_fal_judge(self, runner: CliRunner) -> None:
+        """With FAL_KEY but no GEMINI_API_KEY, eval should auto-select fal/gemini-2.5-flash."""
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "GEMINI_API_KEY"}
+        env["FAL_KEY"] = "fal_test_key"
+        with patch.dict("os.environ", env, clear=True), \
+             patch("evalytic.cli.main.load_dotenv"), \
+             patch("evalytic.config.apply_keys"), \
+             patch("evalytic.cli.eval_cmd.Judge") as mock_judge_cls:
+            mock_judge = mock_judge_cls.return_value.__enter__.return_value
+            mock_judge.score.return_value = []
+            result = runner.invoke(cli, ["eval", "--image", "photo.jpg", "-d", "visual_quality"])
+        mock_judge_cls.assert_called_once_with(judge="fal/gemini-2.5-flash", base_url=None)
 
 
 class TestEvalScoring:
@@ -320,3 +336,59 @@ class TestLocalFileSupport:
         judge = GeminiJudge(api_key="test-key")
         with pytest.raises(ValidationError, match="Image file not found"):
             judge._fetch_image_base64("/nonexistent/image.jpg")
+
+
+# -----------------------------------------------------------------------
+# --no-judge mode
+# -----------------------------------------------------------------------
+
+
+class TestEvalNoJudge:
+    """Tests for eval --no-judge metrics-only mode."""
+
+    def test_help_shows_no_judge(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["eval", "--help"])
+        assert "--no-judge" in result.output
+
+    def test_no_judge_with_local_image(self, runner: CliRunner, tmp_path: Path) -> None:
+        """--no-judge should run sharpness on a local image without API keys."""
+        # Create a small valid PNG image
+        from PIL import Image
+        img = Image.new("RGB", (64, 64), color="red")
+        img_path = tmp_path / "test.png"
+        img.save(str(img_path))
+
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("GEMINI_API_KEY", "FAL_KEY")}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("evalytic.cli.main.load_dotenv"), \
+             patch("evalytic.config.apply_keys"):
+            result = runner.invoke(cli, [
+                "eval", "--image", str(img_path), "--no-judge",
+            ])
+        assert result.exit_code == 0
+        assert "Sharpness" in result.output
+        assert "metrics only" in result.output
+
+    def test_no_judge_with_json_output(self, runner: CliRunner, tmp_path: Path) -> None:
+        """--no-judge should write metrics to JSON output."""
+        from PIL import Image
+        img = Image.new("RGB", (64, 64), color="blue")
+        img_path = tmp_path / "test.png"
+        img.save(str(img_path))
+        out_path = tmp_path / "result.json"
+
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("GEMINI_API_KEY", "FAL_KEY")}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("evalytic.cli.main.load_dotenv"), \
+             patch("evalytic.config.apply_keys"):
+            result = runner.invoke(cli, [
+                "eval", "--image", str(img_path), "--no-judge",
+                "-o", str(out_path),
+            ])
+        assert result.exit_code == 0
+        data = json.loads(out_path.read_text())
+        assert data["judge"] is None
+        assert "sharpness" in data["metrics"]
+        assert 0.0 <= data["metrics"]["sharpness"] <= 1.0

@@ -273,7 +273,7 @@ class TestRegistry:
     def test_list_models_filter(self) -> None:
         t2i = list_models(pipeline="text2img")
         assert all(e.pipeline == "text2img" for e in t2i)
-        assert len(t2i) == 17
+        assert len(t2i) == 37
 
         i2i = list_models(pipeline="img2img")
         assert len(i2i) == 7
@@ -1164,6 +1164,90 @@ class TestSharpnessScorer:
 
 
 # -----------------------------------------------------------------------
+# Aesthetic scorer
+# -----------------------------------------------------------------------
+
+
+class TestAestheticScorer:
+    def test_importable(self) -> None:
+        from evalytic.bench.metrics import AestheticScorer
+
+        assert AestheticScorer is not None
+
+    def test_requires_metrics(self) -> None:
+        """AestheticScorer raises if evalytic[metrics] not installed."""
+        from evalytic.bench import metrics as m
+
+        orig = m.METRICS_AVAILABLE
+        try:
+            m.METRICS_AVAILABLE = False
+            with pytest.raises(RuntimeError, match="evalytic\\[metrics\\]"):
+                m.AestheticScorer()
+        finally:
+            m.METRICS_AVAILABLE = orig
+
+    def test_reuses_clip_scorer(self) -> None:
+        """AestheticScorer accepts clip_scorer parameter."""
+        from evalytic.bench.metrics import AestheticScorer, METRICS_AVAILABLE
+
+        if not METRICS_AVAILABLE:
+            pytest.skip("evalytic[metrics] not installed")
+        scorer = AestheticScorer(clip_scorer=None)
+        assert scorer._clip_scorer is None
+
+    def test_score_returns_float_in_range(self, tmp_path: Path) -> None:
+        """AestheticScorer.score() returns float in [0, 1]."""
+        from evalytic.bench.metrics import AestheticScorer, METRICS_AVAILABLE
+
+        if not METRICS_AVAILABLE:
+            pytest.skip("evalytic[metrics] not installed")
+        from PIL import Image
+
+        img = Image.new("RGB", (256, 256), (128, 100, 80))
+        path = str(tmp_path / "test.png")
+        img.save(path)
+
+        scorer = AestheticScorer()
+        val = scorer.score(path)
+        assert isinstance(val, float)
+        assert 0.0 <= val <= 1.0
+
+    def test_compute_metrics_aesthetic(self, tmp_path: Path) -> None:
+        """compute_metrics includes aesthetic/nima score when requested."""
+        from evalytic.bench.metrics import METRICS_AVAILABLE, NIMA_AVAILABLE
+
+        if not METRICS_AVAILABLE and not NIMA_AVAILABLE:
+            pytest.skip("evalytic[metrics] not installed")
+        from PIL import Image
+        from evalytic.bench.metrics import compute_metrics
+        from evalytic.bench.types import BenchItem, ImageResult
+
+        img = Image.new("RGB", (64, 64), "blue")
+        img_path = str(tmp_path / "test.png")
+        img.save(img_path)
+
+        item = BenchItem(
+            item_id="t1",
+            prompt="test",
+            results={
+                "model-a": ImageResult(
+                    model="model-a",
+                    image_url="http://example.com/img.png",
+                    image_local=img_path,
+                    status="success",
+                ),
+            },
+        )
+        compute_metrics([item], ["aesthetic"], "text2img", [{"item_id": "t1", "prompt": "test"}])
+        metrics = item.results["model-a"].metrics
+        # "aesthetic" alias maps to NimaScorer (nima_score) if pyiqa available,
+        # otherwise falls back to AestheticScorer (aesthetic_score)
+        aes = [m for m in metrics if m.metric in ("aesthetic_score", "nima_score")]
+        assert len(aes) == 1
+        assert 0.0 <= aes[0].value <= 1.0
+
+
+# -----------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------
 
@@ -1173,7 +1257,7 @@ class TestPublicApi:
         import evalytic
 
         assert callable(evalytic.bench)
-        assert evalytic.__version__ == "0.3.4"
+        assert evalytic.__version__ == "0.3.11"
 
 
 # -----------------------------------------------------------------------
@@ -1328,3 +1412,154 @@ class TestRunError:
         )
         d = report_to_dict(report)
         assert "errors" not in d
+
+
+# -----------------------------------------------------------------------
+# --no-judge (metrics-only) mode
+# -----------------------------------------------------------------------
+
+
+class TestNoJudgeMode:
+    """Tests for metrics-only mode (no VLM judge)."""
+
+    def test_image_result_overall_from_metrics(self) -> None:
+        """ImageResult.overall_score should use metrics when scores are empty."""
+        ir = ImageResult(
+            model="flux-schnell",
+            image_url="https://example.com/img.jpg",
+            scores=[],
+            metrics=[
+                MetricResult(metric="sharpness", value=0.75),
+            ],
+        )
+        assert ir.overall_score == 0.75
+
+    def test_image_result_overall_prefers_scores(self) -> None:
+        """When scores exist, they take precedence over metrics."""
+        ir = ImageResult(
+            model="flux-schnell",
+            image_url="https://example.com/img.jpg",
+            scores=[DimensionResult(dimension="visual_quality", score=4.0)],
+            metrics=[MetricResult(metric="sharpness", value=0.75)],
+        )
+        assert ir.overall_score == 4.0
+
+    def test_image_result_overall_empty(self) -> None:
+        """No scores and no metrics -> 0.0."""
+        ir = ImageResult(model="flux-schnell", image_url="")
+        assert ir.overall_score == 0.0
+
+    def test_image_result_overall_multiple_metrics(self) -> None:
+        """Multiple metrics averaged."""
+        ir = ImageResult(
+            model="flux-schnell",
+            image_url="https://example.com/img.jpg",
+            scores=[],
+            metrics=[
+                MetricResult(metric="sharpness", value=0.80),
+                MetricResult(metric="clip_score", value=0.60),
+            ],
+        )
+        assert ir.overall_score == pytest.approx(0.70)
+
+    def test_bench_report_no_judge(self) -> None:
+        """BenchReport with no judge should have empty judge fields."""
+        report = BenchReport(
+            name="test-no-judge",
+            models=["flux-schnell"],
+            judge="",
+            pipeline="text2img",
+            judges=[],
+            dimensions=[],
+            items=[
+                BenchItem(
+                    item_id="item-001",
+                    prompt="A cat",
+                    results={
+                        "flux-schnell": ImageResult(
+                            model="flux-schnell",
+                            image_url="https://example.com/1.jpg",
+                            scores=[],
+                            metrics=[MetricResult(metric="sharpness", value=0.85)],
+                        ),
+                    },
+                )
+            ],
+            summary={
+                "flux-schnell": ModelSummary(
+                    model="flux-schnell",
+                    overall_score=4.25,
+                    metric_averages={"sharpness": 0.85},
+                ),
+            },
+            winner="flux-schnell",
+            ranking=[("flux-schnell", 4.25)],
+        )
+        assert report.judge == ""
+        assert report.judges == []
+        assert report.dimensions == []
+        d = report_to_dict(report)
+        assert d["winner"] == "flux-schnell"
+        assert "judges" not in d  # no consensus mode
+
+    def test_cost_breakdown_no_judge(self) -> None:
+        """Cost breakdown with no judge should have zero judge cost."""
+        cost = build_cost_breakdown(
+            generation_costs={"flux-schnell": 0.01},
+            generation_count=1,
+            judge_request_count=0,
+            judge="",
+        )
+        assert cost.judge_total_usd == 0.0
+        assert cost.judge_request_count == 0
+
+    def test_estimate_run_cost_no_judge(self) -> None:
+        """estimate_run_cost with empty judge and 0 dimensions."""
+        cost = estimate_run_cost(
+            models=["flux-schnell"],
+            item_count=1,
+            judge="",
+            dimensions_per_item=0,
+        )
+        assert cost.judge_total_usd == 0.0
+
+    def test_no_judge_help_visible(self) -> None:
+        """--no-judge should appear in bench --help."""
+        from click.testing import CliRunner
+        from evalytic.cli.main import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bench", "--help"])
+        assert "--no-judge" in result.output
+
+    def test_no_judge_and_no_metrics_error(self) -> None:
+        """--no-judge + --no-metrics should error."""
+        from click.testing import CliRunner
+        from unittest.mock import patch
+        from evalytic.cli.main import cli
+
+        runner = CliRunner()
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("GEMINI_API_KEY",)}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("evalytic.cli.main.load_dotenv"), \
+             patch("evalytic.config.apply_keys"):
+            result = runner.invoke(cli, [
+                "bench", "-m", "flux-schnell", "-p", "A cat",
+                "--no-judge", "--no-metrics", "-y",
+            ])
+        assert result.exit_code == 2
+        assert "cannot be used together" in result.output
+
+    def test_no_judge_in_essential_help(self) -> None:
+        """--no-judge should appear in Essential Options section."""
+        from click.testing import CliRunner
+        from evalytic.cli.main import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bench", "--help"])
+        output = result.output
+        essential_start = output.index("Essential Options")
+        advanced_start = output.index("Advanced Options")
+        essential_section = output[essential_start:advanced_start]
+        assert "--no-judge" in essential_section

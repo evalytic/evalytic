@@ -4,12 +4,14 @@ Supports multiple providers via a single Judge class:
   - Gemini (default): gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash, gemini-3.1-pro
   - OpenAI: gpt-5.2, o4-mini
   - Anthropic: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5
+  - fal.ai OpenRouter: fal/gemini-2.5-flash, fal/gpt-5.2, fal/claude-sonnet-4-6 (all via FAL_KEY)
   - Self-hosted: ollama/qwen3-vl, ollama/internvl3, lmstudio/*, local/*
 
 Usage:
     judge = Judge("gemini-3-flash")
     judge = Judge("gpt-5.2")
     judge = Judge("claude-sonnet-4-6")
+    judge = Judge("fal/gemini-2.5-flash")    # Gemini via fal.ai OpenRouter
     judge = Judge("ollama/qwen3-vl")
     judge = Judge("local/my-model", base_url="http://localhost:8090/v1")
 """
@@ -17,16 +19,20 @@ Usage:
 from __future__ import annotations
 
 import base64
-import json
-import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from ..exceptions import JudgeError, ValidationError
+from ..exceptions import ValidationError
+from ..judge.common import call_with_retries, guess_mime, parse_response
+from ..judge.providers import (
+    RECOMMENDED_JUDGES,
+    _FAL_MODEL_MAP,
+    _OPENAI_COMPAT_PROVIDERS,
+    _PROVIDER_DEFAULTS,
+    _parse_judge_string,
+    create_provider,
+)
 from .types import DimensionResult
 
 # ---------------------------------------------------------------------------
@@ -48,18 +54,20 @@ SYSTEM_PROMPT = (
 
 VISUAL_QUALITY_PROMPT = """Evaluate the VISUAL QUALITY of this AI-generated image.
 
-Score on a 1-5 scale:
-1 - Very Poor: Major artifacts, distortions, blurring, or incoherent elements
-2 - Poor: Noticeable quality issues, some artifacts, inconsistent rendering
-3 - Average: Acceptable quality, minor artifacts or inconsistencies
-4 - Good: High quality, clean rendering, minimal issues
-5 - Excellent: Professional quality, no visible artifacts, sharp and coherent
+Score on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Major artifacts, distortions, blurring, or incoherent elements
+2.0 - Poor: Noticeable quality issues, some artifacts, inconsistent rendering
+3.0 - Average: Acceptable quality, minor artifacts or inconsistencies
+4.0 - Good: High quality, clean rendering, minimal issues
+5.0 - Excellent: Professional quality, no visible artifacts, sharp and coherent
+
+Use the full range — reserve 5.0 for truly flawless images. Most good images should score 3.5-4.5.
 
 Return JSON:
 {
   "dimensions": [{
     "dimension": "visual_quality",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation>",
     "evidence": ["<specific observation 1>", "<specific observation 2>"]
@@ -70,18 +78,20 @@ PROMPT_ADHERENCE_PROMPT = """Evaluate how well this AI-generated image matches t
 
 Prompt: "{prompt}"
 
-Score on a 1-5 scale:
-1 - Very Poor: Image has almost no relation to the prompt
-2 - Poor: Some elements present but major aspects missing or wrong
-3 - Average: Main subject captured but details differ from prompt
-4 - Good: Strong match to prompt with minor deviations
-5 - Excellent: Perfect representation of the prompt in every detail
+Score on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Image has almost no relation to the prompt
+2.0 - Poor: Some elements present but major aspects missing or wrong
+3.0 - Average: Main subject captured but details differ from prompt
+4.0 - Good: Strong match to prompt with minor deviations
+5.0 - Excellent: Perfect representation of the prompt in every detail
+
+Use the full range — reserve 5.0 for images that match every detail perfectly. Most good images should score 3.5-4.5.
 
 Return JSON:
 {{
   "dimensions": [{{
     "dimension": "prompt_adherence",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation of how well the image matches the prompt>",
     "evidence": ["<specific match or mismatch 1>", "<specific match or mismatch 2>"]
@@ -92,20 +102,21 @@ TEXT_RENDERING_PROMPT = """Evaluate the TEXT RENDERING quality in this AI-genera
 
 Expected text content (from prompt): "{prompt}"
 
-Score on a 1-5 scale:
-1 - Very Poor: Text is unreadable, garbled, or completely wrong
-2 - Poor: Text partially readable but with significant errors
-3 - Average: Text mostly readable but with some misspellings or artifacts
-4 - Good: Text is clear and correct with minor rendering issues
-5 - Excellent: Text is perfectly rendered, crisp, and accurate
+Score on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Text is unreadable, garbled, or completely wrong
+2.0 - Poor: Text partially readable but with significant errors
+3.0 - Average: Text mostly readable but with some misspellings or artifacts
+4.0 - Good: Text is clear and correct with minor rendering issues
+5.0 - Excellent: Text is perfectly rendered, crisp, and accurate
 
-If no text is expected in the image, score 5 and note "No text expected."
+If no text is expected in the image, score 5.0 and note "No text expected."
+Use the full range — reserve 5.0 for pixel-perfect text rendering.
 
 Return JSON:
 {{
   "dimensions": [{{
     "dimension": "text_rendering",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation>",
     "evidence": ["<specific observation 1>", "<specific observation 2>"]
@@ -118,18 +129,20 @@ You are given two images:
 - Image 1: The ORIGINAL input image
 - Image 2: The TRANSFORMED output image
 
-Score how well the output preserves key features from the input on a 1-5 scale:
-1 - Very Poor: Key features completely lost (faces unrecognizable, objects missing)
-2 - Poor: Major features lost or significantly altered
-3 - Average: Main subject preserved but noticeable loss of identity/features
-4 - Good: Strong preservation of key features with minor differences
-5 - Excellent: Perfect preservation of identity, faces, objects, and composition
+Score how well the output preserves key features from the input on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Key features completely lost (faces unrecognizable, objects missing)
+2.0 - Poor: Major features lost or significantly altered
+3.0 - Average: Main subject preserved but noticeable loss of identity/features
+4.0 - Good: Strong preservation of key features with minor differences
+5.0 - Excellent: Perfect preservation of identity, faces, objects, and composition
+
+Use the full range — reserve 5.0 for pixel-perfect preservation. Most good transformations should score 3.5-4.5.
 
 Return JSON:
 {
   "dimensions": [{
     "dimension": "input_fidelity",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation comparing input and output>",
     "evidence": ["<specific preserved or lost feature 1>", "<specific preserved or lost feature 2>"]
@@ -142,18 +155,20 @@ You are given two images:
 - Image 1: The ORIGINAL input image
 - Image 2: The TRANSFORMED output image
 
-Score how well the intended transformation was applied on a 1-5 scale:
-1 - Very Poor: Transformation not applied or completely wrong result
-2 - Poor: Transformation partially applied with major issues
-3 - Average: Transformation applied but with noticeable flaws
-4 - Good: Transformation well-applied with minor imperfections
-5 - Excellent: Transformation perfectly applied, natural-looking result
+Score how well the intended transformation was applied on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Transformation not applied or completely wrong result
+2.0 - Poor: Transformation partially applied with major issues
+3.0 - Average: Transformation applied but with noticeable flaws
+4.0 - Good: Transformation well-applied with minor imperfections
+5.0 - Excellent: Transformation perfectly applied, natural-looking result
+
+Use the full range — reserve 5.0 for flawless transformations. Most good results should score 3.5-4.5.
 
 Return JSON:
 {
   "dimensions": [{
     "dimension": "transformation_quality",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation of transformation quality>",
     "evidence": ["<specific observation 1>", "<specific observation 2>"]
@@ -166,18 +181,20 @@ You are given two images:
 - Image 1: The ORIGINAL input image
 - Image 2: The TRANSFORMED output image
 
-Score the absence of artifacts introduced by the transformation on a 1-5 scale:
-1 - Very Poor: Severe artifacts (halos, seams, color banding, blurring, ghosting)
-2 - Poor: Multiple noticeable artifacts
-3 - Average: Some minor artifacts visible on close inspection
-4 - Good: Very few artifacts, barely noticeable
-5 - Excellent: No visible artifacts, clean transformation
+Score the absence of artifacts introduced by the transformation on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Severe artifacts (halos, seams, color banding, blurring, ghosting)
+2.0 - Poor: Multiple noticeable artifacts
+3.0 - Average: Some minor artifacts visible on close inspection
+4.0 - Good: Very few artifacts, barely noticeable
+5.0 - Excellent: No visible artifacts, clean transformation
+
+Use the full range — reserve 5.0 for artifact-free results.
 
 Return JSON:
 {
   "dimensions": [{
     "dimension": "artifact_detection",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation of artifacts found or absent>",
     "evidence": ["<specific artifact or clean area 1>", "<specific artifact or clean area 2>"]
@@ -191,15 +208,17 @@ You are given two images:
 - Image 2: The TRANSFORMED output image
 
 FIRST: Determine if there are any human faces or people in the INPUT image.
-If NO people/faces in the input image: score 5, confidence 1.0,
+If NO people/faces in the input image: score 5.0, confidence 1.0,
 explanation "No human faces in input image — identity preservation not applicable."
 
-If people ARE present, score on a 1-5 scale:
-1 - Very Poor: Face completely changed, person unrecognizable
-2 - Poor: Major facial feature changes (eye shape, nose, jawline altered)
-3 - Average: Same person recognizable but noticeable differences (skin tone, expression, proportions)
-4 - Good: Strong resemblance, minor differences only visible on close comparison
-5 - Excellent: Perfect identity match — face, skin tone, body proportions fully preserved
+If people ARE present, score on a 1.0-5.0 scale using 0.1 increments (e.g., 3.7, 4.2, 4.8):
+1.0 - Very Poor: Face completely changed, person unrecognizable
+2.0 - Poor: Major facial feature changes (eye shape, nose, jawline altered)
+3.0 - Average: Same person recognizable but noticeable differences (skin tone, expression, proportions)
+4.0 - Good: Strong resemblance, minor differences only visible on close comparison
+5.0 - Excellent: Perfect identity match — face, skin tone, body proportions fully preserved
+
+Use the full range — reserve 5.0 for indistinguishable identity matches.
 
 Focus specifically on:
 - Facial feature accuracy (eyes, nose, mouth, jawline)
@@ -211,7 +230,7 @@ Return JSON:
 {
   "dimensions": [{
     "dimension": "identity_preservation",
-    "score": <1-5>,
+    "score": <1.0-5.0>,
     "confidence": <0.0-1.0>,
     "explanation": "<2-3 sentence explanation of identity preservation>",
     "evidence": ["<specific preserved or changed feature 1>", "<specific preserved or changed feature 2>"]
@@ -241,123 +260,6 @@ DIMENSION_CONFIG: dict[str, _DimConfig] = {
 
 ALL_JUDGE_DIMENSIONS = list(DIMENSION_CONFIG.keys())
 
-# ---------------------------------------------------------------------------
-# Provider config
-# ---------------------------------------------------------------------------
-
-_PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
-    "gemini": {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "env_key": "GEMINI_API_KEY",
-    },
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "env_key": "OPENAI_API_KEY",
-    },
-    "anthropic": {
-        "base_url": "https://api.anthropic.com",
-        "env_key": "ANTHROPIC_API_KEY",
-    },
-    "ollama": {
-        "base_url": "http://localhost:11434/v1",
-        "env_key": None,
-    },
-    "lmstudio": {
-        "base_url": "http://localhost:1234/v1",
-        "env_key": None,
-    },
-    "local": {
-        "base_url": "http://localhost:8090/v1",
-        "env_key": None,
-    },
-}
-
-# Providers that use OpenAI-compatible API format
-_OPENAI_COMPAT_PROVIDERS = {"openai", "ollama", "lmstudio", "local"}
-
-# Short aliases → actual Gemini API model names.
-# Users type "gemini-3-flash", API expects "gemini-3-flash-preview".
-_GEMINI_MODEL_ALIASES: dict[str, str] = {
-    "gemini-3-flash": "gemini-3-flash-preview",
-    "gemini-3.1-pro": "gemini-3.1-pro-preview",
-    "gemini-3-pro": "gemini-3-pro-preview",
-}
-
-# Recommended judge models by provider (for docs/CLI help)
-RECOMMENDED_JUDGES: dict[str, list[str]] = {
-    "gemini": [
-        "gemini-3-flash",       # Best quality/price — MMMU 87.6%, $0.50/M input
-        "gemini-3.1-pro",       # Flagship — $2.00/M input
-        "gemini-2.5-flash",     # Budget — $0.30/M input
-    ],
-    "openai": [
-        "gpt-5.2",             # Best accuracy — MMMU-Pro 86.5%, $1.75/M input
-        "o4-mini",             # Reasoning — $1.10/M input
-    ],
-    "anthropic": [
-        "claude-sonnet-4-6",   # Balanced — $3.00/M input
-        "claude-opus-4-6",     # Premium — $5.00/M input
-        "claude-haiku-4-5",    # Fast — $0.80/M input
-    ],
-    "self-hosted": [
-        "ollama/qwen3-vl",            # Best open-source VLM
-        "ollama/internvl3",            # Strong open-source alternative
-        "ollama/glm-4.1v-9b-thinking", # Compact reasoning VLM
-    ],
-}
-
-# Prefixes that map to OpenAI provider (gpt-*, o1-*, o3-*, o4-*, chatgpt-*)
-_OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "chatgpt")
-
-
-def _parse_judge_string(judge: str) -> tuple[str, str]:
-    """Parse a judge string into (provider, model).
-
-    Examples:
-        "gemini-3-flash"            -> ("gemini", "gemini-3-flash")
-        "gpt-5.2"                   -> ("openai", "gpt-5.2")
-        "o4-mini"                   -> ("openai", "o4-mini")
-        "claude-sonnet-4-6"         -> ("anthropic", "claude-sonnet-4-6")
-        "openai/gpt-5.2"            -> ("openai", "gpt-5.2")
-        "ollama/qwen3-vl"           -> ("ollama", "qwen3-vl")
-        "local/my-model"            -> ("local", "my-model")
-    """
-    if "/" in judge:
-        provider, model = judge.split("/", 1)
-        if provider not in _PROVIDER_DEFAULTS:
-            raise ValidationError(
-                f"Unknown judge provider: {provider!r}. "
-                f"Valid: {sorted(_PROVIDER_DEFAULTS)}"
-            )
-        return provider, model
-
-    # Bare model name -- infer provider from prefix
-    if judge.startswith("gemini"):
-        return "gemini", judge
-    for prefix in _OPENAI_PREFIXES:
-        if judge.startswith(prefix):
-            return "openai", judge
-    if judge.startswith("claude"):
-        return "anthropic", judge
-
-    # Default to gemini for backward compat
-    return "gemini", judge
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _guess_mime(url: str) -> str:
-    lower = url.lower().split("?")[0]
-    if lower.endswith(".png"):
-        return "image/png"
-    if lower.endswith(".webp"):
-        return "image/webp"
-    if lower.endswith(".gif"):
-        return "image/gif"
-    return "image/jpeg"
-
 
 # ---------------------------------------------------------------------------
 # Judge (multi-provider)
@@ -372,20 +274,16 @@ class Judge:
         api_key: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        self.provider, self.model = _parse_judge_string(judge)
+        self._provider, self.provider, self.model = create_provider(
+            judge, api_key=api_key, base_url=base_url,
+        )
         self.judge_string = judge
+        self.base_url = self._provider.base_url
+        self.api_key = self._provider.api_key
 
-        # Resolve short aliases to actual API model names
-        if self.provider == "gemini":
-            self.model = _GEMINI_MODEL_ALIASES.get(self.model, self.model)
-
-        defaults = _PROVIDER_DEFAULTS[self.provider]
-        self.base_url = base_url or defaults["base_url"]
-
-        env_key = defaults["env_key"]
-        self.api_key = api_key or (os.environ.get(env_key, "") if env_key else "")
-
-        self._client = httpx.Client(timeout=60)
+        # Share the provider's httpx client for image fetching too.
+        # This keeps a single _client attribute (backward compat with tests).
+        self._client = self._provider._client
 
     def score(
         self,
@@ -420,8 +318,13 @@ class Judge:
 
             images.append(self._fetch_image_base64(image_url))
 
-            # Dispatch to provider
-            raw = self._call_api(images, user_prompt)
+            # Dispatch to provider with retries
+            raw = call_with_retries(
+                self._provider.complete,
+                user_prompt,
+                SYSTEM_PROMPT,
+                images=images,
+            )
 
             for d in raw.get("dimensions", []):
                 results.append(
@@ -444,164 +347,28 @@ class Judge:
             p = Path(url).expanduser()
             if not p.exists():
                 raise ValidationError(f"Image file not found: {url}")
-            return base64.b64encode(p.read_bytes()).decode("utf-8"), _guess_mime(str(p))
+            return base64.b64encode(p.read_bytes()).decode("utf-8"), guess_mime(str(p))
         resp = self._client.get(url, follow_redirects=True)
         resp.raise_for_status()
-        mime = resp.headers.get("content-type", _guess_mime(url))
+        mime = resp.headers.get("content-type", guess_mime(url))
         return base64.b64encode(resp.content).decode("utf-8"), mime
-
-    # -- Provider dispatch -------------------------------------------------
-
-    def _call_api(
-        self,
-        images: list[tuple[str, str]],
-        user_prompt: str,
-    ) -> dict[str, Any]:
-        """Route to the correct provider with retries."""
-        if self.provider == "gemini":
-            call_fn = self._call_gemini
-        elif self.provider in _OPENAI_COMPAT_PROVIDERS:
-            call_fn = self._call_openai_compat
-        elif self.provider == "anthropic":
-            call_fn = self._call_anthropic
-        else:
-            raise ValidationError(f"Unknown provider: {self.provider!r}")
-
-        last_error: Exception | None = None
-        for attempt in range(3):
-            if attempt > 0:
-                time.sleep(2**attempt)
-            try:
-                return call_fn(images, user_prompt)
-            except Exception as exc:
-                last_error = exc
-        raise JudgeError(
-            f"Judge failed after 3 retries: {last_error}"
-        ) from last_error  # type: ignore[misc]
-
-    # -- Gemini ------------------------------------------------------------
-
-    def _call_gemini(
-        self,
-        images: list[tuple[str, str]],
-        user_prompt: str,
-    ) -> dict[str, Any]:
-        parts: list[dict[str, Any]] = []
-        for b64, mime in images:
-            parts.append({"inlineData": {"mimeType": mime, "data": b64}})
-        parts.append({"text": user_prompt})
-
-        payload = {
-            "contents": [{"parts": parts}],
-            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-            },
-        }
-        url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
-
-        resp = self._client.post(url, json=payload)
-        resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return self._parse_response(text)
-
-    # -- OpenAI-compatible (OpenAI, Ollama, LM Studio, local) --------------
-
-    def _call_openai_compat(
-        self,
-        images: list[tuple[str, str]],
-        user_prompt: str,
-    ) -> dict[str, Any]:
-        content: list[dict[str, Any]] = []
-        for b64, mime in images:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
-        content.append({"type": "text", "text": user_prompt})
-
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": content},
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }
-        url = f"{self.base_url}/chat/completions"
-
-        headers: dict[str, str] = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        resp = self._client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
-        return self._parse_response(text)
-
-    # -- Anthropic ---------------------------------------------------------
-
-    def _call_anthropic(
-        self,
-        images: list[tuple[str, str]],
-        user_prompt: str,
-    ) -> dict[str, Any]:
-        content: list[dict[str, Any]] = []
-        for b64, mime in images:
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": mime, "data": b64},
-            })
-        content.append({"type": "text", "text": user_prompt})
-
-        payload = {
-            "model": self.model,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": content}],
-            "max_tokens": 1024,
-            "temperature": 0.1,
-        }
-        url = f"{self.base_url}/v1/messages"
-
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-
-        resp = self._client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        text = resp.json()["content"][0]["text"]
-        return self._parse_response(text)
-
-    # -- Response parsing (shared) -----------------------------------------
-
-    @staticmethod
-    def _parse_response(text: str) -> dict[str, Any]:
-        """Parse JSON from VLM response, with markdown fence fallback."""
-        try:
-            return json.loads(text)  # type: ignore[no-any-return]
-        except json.JSONDecodeError:
-            if "```json" in text:
-                json_str = text.split("```json")[1].split("```")[0].strip()
-                return json.loads(json_str)  # type: ignore[no-any-return]
-            if "```" in text:
-                json_str = text.split("```")[1].split("```")[0].strip()
-                return json.loads(json_str)  # type: ignore[no-any-return]
-            raise
 
     # -- Lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
-        self._client.close()
+        self._provider.close()
 
     def __enter__(self) -> Judge:
         return self
 
     def __exit__(self, *_: Any) -> None:
         self.close()
+
+    # -- Backward compat (used by tests) -----------------------------------
+
+    @staticmethod
+    def _parse_response(text: str) -> dict[str, Any]:
+        return parse_response(text)
 
 
 # Backward compatibility alias

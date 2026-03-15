@@ -725,3 +725,190 @@ class TestCostEfficiency:
         assert "BEST VALUE" in output
         assert "cheap" in output
         assert "cheaper" in output
+
+
+# -----------------------------------------------------------------------
+# Dimension weights
+# -----------------------------------------------------------------------
+
+
+class TestDimensionWeights:
+    def test_equal_weights_default(self) -> None:
+        """Empty dimension_weights = equal weight (1/n)."""
+        sc = ScoringConfig()
+        weights = sc.resolve_dimension_weights(["visual_quality", "prompt_adherence"])
+        assert weights["visual_quality"] == pytest.approx(0.5)
+        assert weights["prompt_adherence"] == pytest.approx(0.5)
+
+    def test_custom_weights(self) -> None:
+        """Weighted average is computed correctly."""
+        from evalytic.bench.runner import _aggregate_model_summary
+
+        items = [
+            BenchItem(
+                item_id="item-001",
+                prompt="A cat",
+                results={
+                    "model-a": ImageResult(
+                        model="model-a",
+                        image_url="https://example.com/1.jpg",
+                        scores=[
+                            DimensionResult(dimension="visual_quality", score=5.0),
+                            DimensionResult(dimension="prompt_adherence", score=1.0),
+                        ],
+                    ),
+                },
+            ),
+        ]
+        sc = ScoringConfig(dimension_weights={"visual_quality": 0.8, "prompt_adherence": 0.2})
+        ms = _aggregate_model_summary("model-a", items, ["visual_quality", "prompt_adherence"], sc)
+        # 5.0 * 0.8 + 1.0 * 0.2 = 4.2
+        assert ms.overall_score == pytest.approx(4.2, abs=0.01)
+
+    def test_partial_weights(self) -> None:
+        """Unspecified dimensions get equal share of remaining weight."""
+        sc = ScoringConfig(dimension_weights={"visual_quality": 0.6})
+        weights = sc.resolve_dimension_weights(["visual_quality", "prompt_adherence", "text_rendering"])
+        assert weights["visual_quality"] == pytest.approx(0.6)
+        # Remaining 0.4 split equally between 2 unspecified
+        assert weights["prompt_adherence"] == pytest.approx(0.2)
+        assert weights["text_rendering"] == pytest.approx(0.2)
+
+    def test_weights_normalize(self) -> None:
+        """Weights that don't sum to 1.0 are normalized."""
+        sc = ScoringConfig(dimension_weights={"visual_quality": 2.0, "prompt_adherence": 3.0})
+        weights = sc.resolve_dimension_weights(["visual_quality", "prompt_adherence"])
+        assert sum(weights.values()) == pytest.approx(1.0)
+        assert weights["visual_quality"] == pytest.approx(0.4)
+        assert weights["prompt_adherence"] == pytest.approx(0.6)
+
+    def test_dim_weights_in_report_config(self) -> None:
+        """Dimension weights should be stored in report config."""
+        report = BenchReport(
+            name="test",
+            models=["m1"],
+            judge="gemini-2.0-flash",
+            pipeline="text2img",
+            config={"dimension_weights": {"visual_quality": 0.8, "prompt_adherence": 0.2}},
+        )
+        assert report.config["dimension_weights"]["visual_quality"] == 0.8
+
+    def test_dim_weights_with_metrics(self) -> None:
+        """Dimension weights work alongside metric weights."""
+        from evalytic.bench.runner import _aggregate_model_summary
+
+        items = [
+            BenchItem(
+                item_id="item-001",
+                prompt="A cat",
+                results={
+                    "model-a": ImageResult(
+                        model="model-a",
+                        image_url="https://example.com/1.jpg",
+                        scores=[
+                            DimensionResult(dimension="visual_quality", score=5.0),
+                            DimensionResult(dimension="prompt_adherence", score=1.0),
+                        ],
+                        metrics=[MetricResult(metric="clip_score", value=0.28)],
+                    ),
+                },
+            ),
+        ]
+        sc = ScoringConfig.default()
+        sc.dimension_weights = {"visual_quality": 0.8, "prompt_adherence": 0.2}
+        ms = _aggregate_model_summary("model-a", items, ["visual_quality", "prompt_adherence"], sc)
+        # VLM weighted avg = 5.0 * 0.8 + 1.0 * 0.2 = 4.2
+        # Then metric-weighted overall adjusts further
+        assert ms.overall_score > 0
+
+    def test_backward_compat_no_weights(self) -> None:
+        """Empty dimension_weights produces same result as old behavior."""
+        from evalytic.bench.runner import _aggregate_model_summary
+
+        items = [
+            BenchItem(
+                item_id="item-001",
+                prompt="A cat",
+                results={
+                    "model-a": ImageResult(
+                        model="model-a",
+                        image_url="https://example.com/1.jpg",
+                        scores=[
+                            DimensionResult(dimension="visual_quality", score=4.0),
+                            DimensionResult(dimension="prompt_adherence", score=3.0),
+                        ],
+                    ),
+                },
+            ),
+        ]
+        ms_no_config = _aggregate_model_summary("model-a", items, ["visual_quality", "prompt_adherence"])
+        ms_empty = _aggregate_model_summary("model-a", items, ["visual_quality", "prompt_adherence"], ScoringConfig())
+        assert ms_no_config.overall_score == ms_empty.overall_score
+        assert ms_no_config.overall_score == pytest.approx(3.5)
+
+    def test_resolve_dimension_weights(self) -> None:
+        """resolve_dimension_weights unit test."""
+        sc = ScoringConfig(dimension_weights={"a": 0.5, "b": 0.3})
+        weights = sc.resolve_dimension_weights(["a", "b", "c"])
+        assert sum(weights.values()) == pytest.approx(1.0)
+        assert weights["a"] > weights["b"] > weights["c"]
+
+    def test_resolve_partial(self) -> None:
+        """Partial weights: unspecified dims share remainder."""
+        sc = ScoringConfig(dimension_weights={"x": 0.5})
+        weights = sc.resolve_dimension_weights(["x", "y"])
+        assert sum(weights.values()) == pytest.approx(1.0)
+        assert weights["x"] == pytest.approx(0.5)
+        assert weights["y"] == pytest.approx(0.5)
+
+    def test_resolve_normalize(self) -> None:
+        """Non-1.0 sum gets normalized."""
+        sc = ScoringConfig(dimension_weights={"a": 1.0, "b": 1.0})
+        weights = sc.resolve_dimension_weights(["a", "b"])
+        assert weights["a"] == pytest.approx(0.5)
+        assert weights["b"] == pytest.approx(0.5)
+
+
+# -----------------------------------------------------------------------
+# Normalize range overrides
+# -----------------------------------------------------------------------
+
+
+class TestNormalizeRangeOverrides:
+    def test_custom_clip_range(self) -> None:
+        """Custom normalize range produces different normalized value."""
+        from evalytic.bench.metrics import normalize_metric
+
+        # Default range (0.18, 0.35): 0.265 → 2.5
+        default_result = normalize_metric(0.265, 0.18, 0.35)
+        # Custom range (0.20, 0.40): 0.265 → different value
+        custom_result = normalize_metric(0.265, 0.20, 0.40)
+        assert default_result != custom_result
+        assert 0 <= custom_result <= 5
+
+    def test_range_in_scoring_config(self) -> None:
+        """ScoringConfig stores custom normalize_range."""
+        sc = ScoringConfig(
+            metric_configs={
+                "clip_score": MetricScoringConfig(
+                    flag_threshold=0.18,
+                    weight=0.20,
+                    normalize_range=(0.20, 0.40),
+                ),
+            }
+        )
+        assert sc.metric_configs["clip_score"].normalize_range == (0.20, 0.40)
+
+    def test_custom_range_in_to_dict(self) -> None:
+        """to_dict() includes custom normalize_range."""
+        sc = ScoringConfig(
+            metric_configs={
+                "clip_score": MetricScoringConfig(
+                    flag_threshold=0.18,
+                    weight=0.20,
+                    normalize_range=(0.20, 0.40),
+                ),
+            }
+        )
+        d = sc.to_dict()
+        assert d["clip_score"]["normalize_range"] == [0.20, 0.40]

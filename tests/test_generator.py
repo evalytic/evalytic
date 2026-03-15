@@ -126,6 +126,7 @@ class TestGenerateBatch:
         assert all(r.status == "success" for r in results)
 
     def test_partial_failure(self, entry: ModelEntry, mock_fal_client: types.ModuleType) -> None:
+        """First item fails on both attempts (original + retry), second succeeds."""
         from evalytic.bench.generator import generate_batch
 
         call_count = 0
@@ -133,7 +134,8 @@ class TestGenerateBatch:
         def mock_subscribe(endpoint, arguments, client_timeout=300):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
+            # Calls 1-2 are item-001 (attempt + retry) — both fail
+            if call_count <= 2:
                 raise RuntimeError("Fail")
             return {"images": [{"url": "https://example.com/ok.jpg"}]}
 
@@ -147,6 +149,26 @@ class TestGenerateBatch:
 
         statuses = sorted(r.status for r in results)
         assert statuses == ["failed", "success"]
+
+    def test_retry_recovers(self, entry: ModelEntry, mock_fal_client: types.ModuleType) -> None:
+        """First attempt fails, retry succeeds."""
+        from evalytic.bench.generator import generate_single
+
+        call_count = 0
+
+        def mock_subscribe(endpoint, arguments, client_timeout=300):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Transient error")
+            return {"images": [{"url": "https://example.com/ok.jpg"}]}
+
+        mock_fal_client.subscribe = mock_subscribe
+        result = generate_single(entry, {"prompt": "A cat"}, "item-001")
+
+        assert result.status == "success"
+        assert result.retried is True
+        assert call_count == 2
 
 
 class TestDownloadImage:

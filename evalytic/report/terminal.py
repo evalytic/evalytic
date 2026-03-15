@@ -92,7 +92,10 @@ def create_scoring_progress() -> Progress:
 
 def _has_weighted_scoring(report: BenchReport) -> bool:
     """Check if any model has weighted overall scoring active."""
-    return any(ms.weighted_overall_score is not None for ms in report.summary.values())
+    if any(ms.weighted_overall_score is not None for ms in report.summary.values()):
+        return True
+    # Also true when dimension_weights are configured
+    return bool(report.config.get("dimension_weights"))
 
 
 def print_comparison_table(report: BenchReport) -> None:
@@ -106,15 +109,22 @@ def print_comparison_table(report: BenchReport) -> None:
 
     weighted = _has_weighted_scoring(report)
 
+    # Resolve dimension weights for display
+    dim_weights: dict[str, float] = report.config.get("dimension_weights", {})
+
     table = Table(title="Model Comparison", show_lines=True)
     table.add_column("Model", style="bold")
     for dim in report.dimensions:
-        table.add_column(dim.replace("_", " ").title(), justify="center")
+        label = dim.replace("_", " ").title()
+        if dim_weights and dim in dim_weights:
+            label += f" ({int(dim_weights[dim] * 100)}%)"
+        table.add_column(label, justify="center")
     for m_name in metric_names:
         label = {"clip_score": "CLIP", "lpips": "LPIPS"}.get(m_name, m_name)
         table.add_column(label, justify="center")
     overall_header = "Overall*" if weighted else "Overall"
     table.add_column(overall_header, justify="center", style="bold")
+    table.add_column("Avg Time", justify="center")
     table.add_column("Conf", justify="center")
     # Show agreement column in consensus mode
     if report.consensus_mode:
@@ -149,6 +159,12 @@ def print_comparison_table(report: BenchReport) -> None:
         color = score_color(ms.overall_score)
         sd_txt = f"[dim]±{ms.overall_stddev:.1f}[/dim]" if ms.overall_stddev > 0 and ms.sample_count >= 2 else ""
         row.append(f"[{color}]{ms.overall_score:.1f}[/{color}]{sd_txt}")
+        # Avg generation time column
+        if ms.item_count > 0 and ms.total_generation_time_ms > 0:
+            avg_time_s = ms.total_generation_time_ms / ms.item_count / 1000
+            row.append(f"[dim]{avg_time_s:.1f}s[/dim]")
+        else:
+            row.append("[dim]-[/dim]")
         # Confidence column
         conf_pct = int(ms.avg_confidence * 100)
         conf_color = "green" if ms.avg_confidence >= 0.8 else ("yellow" if ms.avg_confidence >= 0.5 else "red")
@@ -334,13 +350,20 @@ def print_cost_summary(report: BenchReport) -> None:
             format_cost(cost.judge_total_usd),
             provider_detail,
         )
-    else:
-        judge_note = "Free tier" if cost.judge_total_usd < 0.01 else ""
+    elif cost.judge_provider:
         table.add_row(
             f"{cost.judge_provider} judge",
             str(cost.judge_request_count),
             format_cost(cost.judge_total_usd),
-            judge_note,
+            "",
+        )
+    else:
+        # No judge (--no-judge mode)
+        table.add_row(
+            "VLM judge",
+            "0",
+            format_cost(0.0),
+            "Skipped (--no-judge)",
         )
     # Metrics row (always $0.00 — local computation)
     has_metrics = any(

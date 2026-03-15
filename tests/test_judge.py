@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from evalytic.bench.judge import (
     DIMENSION_CONFIG,
     Judge,
+    _FAL_MODEL_MAP,
     _parse_judge_string,
 )
 
@@ -195,7 +197,7 @@ class TestRetryLogic:
 
         with patch.object(judge._client, "get", return_value=mock_get), \
              patch.object(judge._client, "post", side_effect=RuntimeError("API error")), \
-             patch("evalytic.bench.judge.time.sleep"):
+             patch("evalytic.judge.common.time.sleep"):
             with pytest.raises(JudgeError, match="API error"):
                 judge.score("https://example.com/img.jpg", ["visual_quality"])
 
@@ -394,6 +396,15 @@ class TestParseJudgeString:
     def test_bare_claude_sonnet_46(self) -> None:
         assert _parse_judge_string("claude-sonnet-4-6") == ("anthropic", "claude-sonnet-4-6")
 
+    def test_explicit_fal(self) -> None:
+        assert _parse_judge_string("fal/gemini-2.5-flash") == ("fal", "gemini-2.5-flash")
+
+    def test_explicit_fal_gpt(self) -> None:
+        assert _parse_judge_string("fal/gpt-5.2") == ("fal", "gpt-5.2")
+
+    def test_explicit_fal_claude(self) -> None:
+        assert _parse_judge_string("fal/claude-sonnet-4-6") == ("fal", "claude-sonnet-4-6")
+
     def test_unknown_bare_defaults_gemini(self) -> None:
         assert _parse_judge_string("some-random-model") == ("gemini", "some-random-model")
 
@@ -501,3 +512,125 @@ class TestAnthropicCall:
         assert headers["x-api-key"] == "test-key"
         assert "anthropic-version" in headers
         j.close()
+
+
+class TestFalProvider:
+    def test_fal_model_mapping_gemini(self) -> None:
+        """fal/gemini-2.5-flash should map to google/gemini-2.5-flash."""
+        j = Judge("fal/gemini-2.5-flash", api_key="fal-key")
+        assert j.provider == "fal"
+        assert j.model == "google/gemini-2.5-flash"
+        j.close()
+
+    def test_fal_model_mapping_gpt(self) -> None:
+        j = Judge("fal/gpt-5.2", api_key="fal-key")
+        assert j.model == "openai/gpt-5.2"
+        j.close()
+
+    def test_fal_model_mapping_claude(self) -> None:
+        j = Judge("fal/claude-sonnet-4-6", api_key="fal-key")
+        assert j.model == "anthropic/claude-sonnet-4-6"
+        j.close()
+
+    def test_fal_model_mapping_passthrough(self) -> None:
+        """Already-mapped names should pass through unchanged."""
+        j = Judge("fal/google/gemini-2.5-flash", api_key="fal-key")
+        # "google/gemini-2.5-flash" is not in _FAL_MODEL_MAP, so stays as-is
+        assert j.model == "google/gemini-2.5-flash"
+        j.close()
+
+    def test_fal_base_url(self) -> None:
+        j = Judge("fal/gemini-2.5-flash", api_key="fal-key")
+        assert j.base_url == "https://fal.run/openrouter/router/openai/v1"
+        j.close()
+
+    def test_fal_api_key_from_env(self) -> None:
+        with patch.dict(os.environ, {"FAL_KEY": "env-fal-key"}):
+            j = Judge("fal/gemini-2.5-flash")
+            assert j.api_key == "env-fal-key"
+            j.close()
+
+    def test_fal_auth_header(self) -> None:
+        """fal provider should use 'Key' auth instead of 'Bearer'."""
+        j = Judge("fal/gemini-2.5-flash", api_key="fal-test-key")
+
+        openai_response = {
+            "choices": [{"message": {"content": json.dumps({
+                "dimensions": [{"dimension": "visual_quality", "score": 4.0,
+                                "explanation": "Good", "evidence": ["clean"]}]
+            })}}]
+        }
+
+        mock_post = MagicMock()
+        mock_post.json.return_value = openai_response
+        mock_post.raise_for_status = MagicMock()
+
+        mock_get = MagicMock()
+        mock_get.content = b"fake-image"
+        mock_get.headers = {"content-type": "image/jpeg"}
+        mock_get.raise_for_status = MagicMock()
+
+        with patch.object(j._client, "get", return_value=mock_get), \
+             patch.object(j._client, "post", return_value=mock_post) as post_call:
+            results = j.score("https://example.com/img.jpg", ["visual_quality"])
+
+        assert len(results) == 1
+        assert results[0].score == 4.0
+
+        # Verify Key auth header (not Bearer)
+        call_args = post_call.call_args
+        headers = call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Key fal-test-key"
+        assert "chat/completions" in call_args.args[0]
+
+        # Verify mapped model name in payload
+        payload = call_args.kwargs["json"]
+        assert payload["model"] == "google/gemini-2.5-flash"
+        j.close()
+
+    def test_fal_uses_openai_compat(self) -> None:
+        """fal should route through _call_openai_compat."""
+        j = Judge("fal/gpt-5.2", api_key="fal-key")
+
+        openai_response = {
+            "choices": [{"message": {"content": json.dumps({
+                "dimensions": [{"dimension": "visual_quality", "score": 5.0,
+                                "explanation": "Great", "evidence": ["sharp"]}]
+            })}}]
+        }
+
+        mock_post = MagicMock()
+        mock_post.json.return_value = openai_response
+        mock_post.raise_for_status = MagicMock()
+
+        mock_get = MagicMock()
+        mock_get.content = b"fake-image"
+        mock_get.headers = {"content-type": "image/jpeg"}
+        mock_get.raise_for_status = MagicMock()
+
+        with patch.object(j._client, "get", return_value=mock_get), \
+             patch.object(j._client, "post", return_value=mock_post):
+            results = j.score("https://example.com/img.jpg", ["visual_quality"])
+
+        assert len(results) == 1
+        assert results[0].score == 5.0
+        j.close()
+
+    def test_fal_cost_lookup(self) -> None:
+        """fal judge cost should resolve correctly."""
+        from evalytic.bench.cost import JUDGE_COSTS, _resolve_judge_model
+
+        resolved = _resolve_judge_model("fal/gemini-2.5-flash")
+        assert resolved == "google/gemini-2.5-flash"
+        assert resolved in JUDGE_COSTS
+
+        resolved_gpt = _resolve_judge_model("fal/gpt-5.2")
+        assert resolved_gpt == "openai/gpt-5.2"
+        assert resolved_gpt in JUDGE_COSTS
+
+    def test_fal_model_map_completeness(self) -> None:
+        """All recommended fal judges should have a model mapping."""
+        from evalytic.bench.judge import RECOMMENDED_JUDGES
+        for judge_str in RECOMMENDED_JUDGES.get("fal", []):
+            _, model = _parse_judge_string(judge_str)
+            assert model in _FAL_MODEL_MAP, f"{model} not in _FAL_MODEL_MAP"

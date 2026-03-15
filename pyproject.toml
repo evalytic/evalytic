@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evalytic"
-version = "0.3.4"
+version = "0.3.11"
 description = "Visual Generation Quality Evaluation SDK"
 readme = "README.md"
 license = "MIT"
@@ -49,10 +49,15 @@ metrics = [
     "lpips>=0.1.4",
     "insightface>=0.7",
     "onnxruntime>=1.16",
+    "pyiqa>=0.1.10",
+]
+ocr = [
+    "pytesseract>=0.3.10",
 ]
 all = [
     "evalytic[generation]",
     "evalytic[metrics]",
+    "evalytic[ocr]",
 ]
 
 [project.scripts]

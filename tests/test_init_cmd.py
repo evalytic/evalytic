@@ -26,17 +26,15 @@ class TestInitHelp:
 
 
 class TestInitTomlCreation:
-    def test_creates_toml_with_keys(self, runner: CliRunner, tmp_path: Path) -> None:
-        """Full wizard flow: picks use case 1, provides keys, writes toml."""
-        # Simulate: use case 1, gemini key, fal key, skip demo
-        user_input = "1\nAItest1234567890\nfal_test_key_abcdef\nn\n"
+    def test_creates_toml_fal_only(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Full wizard flow: picks use case 1, provides fal key, skips gemini."""
+        # Simulate: use case 1, fal key, decline separate gemini
+        user_input = "1\nfal_test_key_abcdef\nn\n"
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            with patch("evalytic.cli.init_cmd._validate_gemini_key", return_value=True), \
-                 patch("evalytic.cli.init_cmd._validate_fal_key", return_value=True), \
+            with patch("evalytic.cli.init_cmd._validate_fal_key", return_value=True), \
                  patch.dict("os.environ", {}, clear=False), \
                  patch("evalytic.cli.main.load_dotenv"):
-                # Remove keys from env to force prompting
                 env = {k: v for k, v in __import__("os").environ.items()
                        if k not in ("GEMINI_API_KEY", "FAL_KEY")}
                 with patch.dict("os.environ", env, clear=True):
@@ -48,7 +46,27 @@ class TestInitTomlCreation:
             content = toml_path.read_text()
             assert "[keys]" in content
             assert "[bench]" in content
+            assert 'judge = "fal/gemini-2.5-flash"' in content
+
+    def test_creates_toml_fal_plus_gemini(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Full wizard flow: picks use case 1, provides fal key + separate gemini key."""
+        # Simulate: use case 1, fal key, accept separate gemini, gemini key
+        user_input = "1\nfal_test_key_abcdef\ny\nAItest1234567890\n"
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("evalytic.cli.init_cmd._validate_gemini_key", return_value=True), \
+                 patch("evalytic.cli.init_cmd._validate_fal_key", return_value=True), \
+                 patch.dict("os.environ", {}, clear=False), \
+                 patch("evalytic.cli.main.load_dotenv"):
+                env = {k: v for k, v in __import__("os").environ.items()
+                       if k not in ("GEMINI_API_KEY", "FAL_KEY")}
+                with patch.dict("os.environ", env, clear=True):
+                    result = runner.invoke(cli, ["init", "--skip-demo"], input=user_input)
+
+            assert result.exit_code == 0
+            content = Path("evalytic.toml").read_text()
             assert 'judge = "gemini-2.5-flash"' in content
+            assert "gemini" in content
 
     def test_skip_overwrite_existing(self, runner: CliRunner, tmp_path: Path) -> None:
         """Don't overwrite existing toml when user says no."""
@@ -83,7 +101,7 @@ class TestInitTomlCreation:
 class TestInitEnvKeyDetection:
     def test_detects_existing_env_keys(self, runner: CliRunner, tmp_path: Path) -> None:
         """When keys are in env, wizard skips prompting for them."""
-        user_input = "1\n"  # Just use case selection
+        user_input = "1\nn\n"  # Use case selection + decline separate gemini
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
             with patch.dict("os.environ", {

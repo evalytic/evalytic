@@ -134,7 +134,7 @@ def _write_toml(path: Path, keys: dict[str, str], judge: str = "gemini-2.5-flash
     path.write_text("\n".join(lines))
 
 
-def _run_demo(fal_key: str | None) -> None:
+def _run_demo(judge: str = "gemini-2.5-flash") -> None:
     """Run a quick demo benchmark."""
     from ..bench.runner import run_bench
     from ..report.terminal import print_full_report
@@ -144,6 +144,7 @@ def _run_demo(fal_key: str | None) -> None:
             models=["flux-schnell"],
             prompts=[{"prompt": "A cat in a top hat, watercolor style"}],
             dimensions=["visual_quality", "prompt_adherence"],
+            judge=judge,
         )
         print_full_report(report)
     except Exception as exc:
@@ -183,13 +184,9 @@ def init_cmd(force: bool, skip_demo: bool) -> None:
     console.print("\n  [bold]API Keys[/bold]")
 
     keys: dict[str, str] = {}
+    judge = "gemini-2.5-flash"
 
-    # Gemini is always needed (for scoring)
-    gemini_key = _collect_key("gemini", required=True)
-    if gemini_key:
-        keys["gemini"] = gemini_key
-
-    # FAL only needed for generation use cases
+    # FAL needed for generation use cases, also works as judge
     if needs_fal:
         fal_key = _collect_key("fal", required=True)
         if fal_key:
@@ -197,15 +194,31 @@ def init_cmd(force: bool, skip_demo: bool) -> None:
     else:
         fal_key = None
 
+    has_fal_key = bool(fal_key or os.environ.get("FAL_KEY"))
+
+    # Gemini is optional if FAL_KEY is available (fal/gemini-2.5-flash works as judge)
+    if has_fal_key:
+        console.print("\n  [dim]Your FAL_KEY can also handle judging (via fal/gemini-2.5-flash).[/dim]")
+        if _prompt_yn("  Add a separate Gemini key? (optional, slightly cheaper)", default=False):
+            gemini_key = _collect_key("gemini", required=True)
+        else:
+            gemini_key = None
+            judge = "fal/gemini-2.5-flash"
+    else:
+        gemini_key = _collect_key("gemini", required=True)
+
+    if gemini_key:
+        keys["gemini"] = gemini_key
+
     # Step 4: Write toml
-    _write_toml(toml_path, keys)
+    _write_toml(toml_path, keys, judge=judge)
     console.print(f"\n  [green]Config written to {toml_path}[/green]")
 
     # Step 5: Demo benchmark
     has_fal = needs_fal and (fal_key or os.environ.get("FAL_KEY"))
-    has_gemini = gemini_key or os.environ.get("GEMINI_API_KEY")
+    has_judge = gemini_key or os.environ.get("GEMINI_API_KEY") or has_fal_key
 
-    if not skip_demo and has_fal and has_gemini:
+    if not skip_demo and has_fal and has_judge:
         if _prompt_yn("\n  Run a quick demo benchmark (~$0.003)?"):
             # Apply keys to env for demo
             if gemini_key:
@@ -213,7 +226,7 @@ def init_cmd(force: bool, skip_demo: bool) -> None:
             if fal_key:
                 os.environ["FAL_KEY"] = fal_key
             console.print()
-            _run_demo(fal_key)
+            _run_demo(judge=judge)
 
     # Step 6: Next steps
     console.print("\n  [bold]Next Steps[/bold]")

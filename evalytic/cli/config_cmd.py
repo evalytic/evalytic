@@ -81,8 +81,9 @@ def config_show(ctx: click.Context) -> None:
 
     # Bench settings
     table.add_section()
-    judge = bench_cfg.get("judge", "gemini-2.5-flash")
-    judge_source = "evalytic.toml" if "judge" in bench_cfg else "default"
+    from .eval_cmd import _resolve_default_judge
+    judge = _resolve_default_judge(config)
+    judge_source = "evalytic.toml" if "judge" in bench_cfg else "auto"
     table.add_row("judge", judge, judge_source)
 
     concurrency = bench_cfg.get("concurrency")

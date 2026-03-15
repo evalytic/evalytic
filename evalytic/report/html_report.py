@@ -155,7 +155,7 @@ HTML_TEMPLATE = Template("""\
       <th>Rank</th>
       <th>Model</th>
       {% for dim in report.dimensions %}
-      <th>{{ dim.replace("_", " ").title() }}{% if dim_variance.get(dim, "") == "differentiator" %}<span style="color:var(--accent);font-size:0.7rem;vertical-align:super" title="High cross-model variance — key differentiator"> ★</span>{% elif dim_variance.get(dim, "") == "ceiling" %}<span style="color:#888;font-size:0.7rem;vertical-align:super" title="All models score similarly — low differentiation"> ≈</span>{% endif %}</th>
+      <th>{{ dim.replace("_", " ").title() }}{% if dim_weights.get(dim) %}<span style="font-size:0.7rem;color:#888;font-weight:400"> ({{ "%.0f" | format(dim_weights[dim] * 100) }}%)</span>{% endif %}{% if dim_variance.get(dim, "") == "differentiator" %}<span style="color:var(--accent);font-size:0.7rem;vertical-align:super" title="High cross-model variance — key differentiator"> ★</span>{% elif dim_variance.get(dim, "") == "ceiling" %}<span style="color:#888;font-size:0.7rem;vertical-align:super" title="All models score similarly — low differentiation"> ≈</span>{% endif %}</th>
       {% endfor %}
       {% for m_name in metric_names %}
       <th>{{ metric_labels.get(m_name, m_name) }}</th>
@@ -538,7 +538,11 @@ HTML_TEMPLATE = Template("""\
   <thead><tr><th>Category</th><th>Requests</th><th>Cost</th></tr></thead>
   <tbody>
     <tr><td>fal.ai generation</td><td>{{ report.cost.generation_request_count }}</td><td>${{ "%.4f" | format(report.cost.generation_total_usd) }}</td></tr>
+    {% if report.cost.judge_provider %}
     <tr><td>{{ report.cost.judge_provider }} judge</td><td>{{ report.cost.judge_request_count }}</td><td>${{ "%.4f" | format(report.cost.judge_total_usd) }}</td></tr>
+    {% else %}
+    <tr><td>VLM judge</td><td>0</td><td>$0.0000</td></tr>
+    {% endif %}
     {% if metric_names %}<tr><td>Local metrics</td><td></td><td>${{ "%.4f" | format(report.cost.metrics_total_usd) }}</td></tr>{% endif %}
     <tr><td><strong>Total</strong></td><td></td><td><strong>${{ "%.4f" | format(report.cost.total_usd) }}</strong></td></tr>
   </tbody>
@@ -548,7 +552,7 @@ HTML_TEMPLATE = Template("""\
   <summary><h2 style="display:inline">Configuration</h2></summary>
   <table>
     <tr><td>Models</td><td>{{ report.models | join(", ") }}</td></tr>
-    <tr><td>Judge</td><td>{{ report.judge }}</td></tr>
+    <tr><td>Judge</td><td>{{ report.judge or "None (metrics only)" }}</td></tr>
     {% if is_consensus %}
     <tr><td>Judges</td><td>{{ report.judges | join(", ") }}</td></tr>
     <tr><td>Consensus Mode</td><td>Adaptive 2+1</td></tr>
@@ -557,10 +561,17 @@ HTML_TEMPLATE = Template("""\
     <tr><td>Pipeline</td><td>{{ report.pipeline }}</td></tr>
     <tr><td>Evalytic Version</td><td>{{ report.metadata.get("evalytic_version", "unknown") }}</td></tr>
     <tr><td>Platform</td><td>{{ report.metadata.get("platform", "unknown") }}</td></tr>
+    {% if dim_weights %}
+    <tr><td>Dimension Weights</td><td>
+      {% for dim, w in dim_weights.items() %}
+      {{ dim.replace("_", " ").title() }}: {{ "%.0f" | format(w * 100) }}%{{ ", " if not loop.last }}
+      {% endfor %}
+    </td></tr>
+    {% endif %}
     {% if scoring_config %}
     <tr><td>Metric Scoring</td><td>
       {% for name, cfg in scoring_config.items() %}
-      {{ name }}: threshold={{ cfg.flag_threshold }}, weight={{ cfg.weight }}{{ ", " if not loop.last }}
+      {% if name != "dimension_weights" %}{{ name }}: threshold={{ cfg.flag_threshold }}, weight={{ cfg.weight }}{{ ", " if not loop.last }}{% endif %}
       {% endfor %}
     </td></tr>
     {% endif %}
@@ -731,6 +742,9 @@ def write_html(report: BenchReport, path: str) -> None:
     # Scoring config from report.config
     scoring_config = report.config.get("scoring_config")
 
+    # Dimension weights from report.config
+    dim_weights: dict[str, float] = report.config.get("dimension_weights", {})
+
     # Radar chart data: model -> {dimension -> score}
     radar_data = {
         model: ms.dimension_averages
@@ -753,6 +767,7 @@ def write_html(report: BenchReport, path: str) -> None:
         is_consensus=report.consensus_mode,
         consensus_stats=consensus_stats,
         dim_variance=dim_variance,
+        dim_weights=dim_weights,
         metric_names=metric_names,
         metric_labels=metric_labels,
         has_weighted=has_weighted,

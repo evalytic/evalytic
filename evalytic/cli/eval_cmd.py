@@ -33,6 +33,16 @@ def _auto_detect_eval_dimensions(
     return dims
 
 
+def _resolve_default_judge(config: dict[str, Any] | None = None) -> str:
+    """Pick the best default judge based on available keys and config."""
+    cfg = (config or {}).get("bench", {})
+    if "judge" in cfg:
+        return cfg["judge"]
+    if os.environ.get("FAL_KEY") and not os.environ.get("GEMINI_API_KEY"):
+        return "fal/gemini-2.5-flash"
+    return "gemini-2.5-flash"
+
+
 @click.command("eval")
 @click.option("--image", required=True, help="Path or URL to the image to evaluate.")
 @click.option(
@@ -41,19 +51,81 @@ def _auto_detect_eval_dimensions(
 )
 @click.option("--prompt", default=None, help="Generation prompt (enables prompt_adherence scoring).")
 @click.option("--input-image", default=None, help="Input image path/URL (enables img2img dimensions).")
-@click.option("--judge", "-j", default="gemini-2.5-flash", show_default=True, help="VLM judge (e.g. openai/gpt-5.2, ollama/qwen2.5-vl:7b).")
+@click.option("--judge", "-j", default=None, help="VLM judge (e.g. fal/gemini-2.5-flash, openai/gpt-5.2). Default: auto-detect from config/env.")
 @click.option("--judge-url", default=None, help="Custom judge API base URL.")
+@click.option("--no-judge", is_flag=True, help="Skip VLM judge, use local metrics only (free, no API key needed).")
 @click.option("--output", "-o", default=None, help="Write results to JSON file.")
+@click.pass_context
 def eval_cmd(
+    ctx: click.Context,
     image: str,
     dimensions: tuple[str, ...],
     prompt: str | None,
     input_image: str | None,
-    judge: str,
+    judge: str | None,
     judge_url: str | None,
+    no_judge: bool,
     output: str | None,
 ) -> None:
     """Score an existing image on quality dimensions (no generation)."""
+    if no_judge:
+        # Metrics-only mode
+        from ..bench.metrics import SharpnessScorer, _resolve_image_path
+
+        # Resolve image path (download URL if needed)
+        local_path = _resolve_image_path(image)
+
+        console.print()
+        console.print("[bold]Eval Results (metrics only)[/bold]")
+
+        table = Table(show_lines=True)
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="center")
+        table.add_column("Description")
+
+        metrics_data: dict[str, float] = {}
+
+        # Sharpness (always available)
+        sharpness_scorer = SharpnessScorer()
+        sharpness = sharpness_scorer.score(local_path)
+        metrics_data["sharpness"] = sharpness
+        table.add_row("Sharpness", f"{sharpness:.4f}", "Variance of Laplacian (0-1)")
+
+        # CLIP score (if prompt given and evalytic[metrics] installed)
+        if prompt:
+            try:
+                from ..bench.metrics import METRICS_AVAILABLE
+                if METRICS_AVAILABLE:
+                    from ..bench.metrics import CLIPScorer
+                    scorer = CLIPScorer()
+                    clip_val = scorer.score(local_path, prompt)
+                    metrics_data["clip_score"] = clip_val
+                    table.add_row("CLIP Score", f"{clip_val:.4f}", "Text-image similarity")
+            except Exception:
+                pass
+
+        console.print(table)
+        console.print()
+
+        # JSON output
+        if output:
+            data: dict[str, Any] = {
+                "image": image,
+                "metrics": metrics_data,
+                "judge": None,
+            }
+            if prompt:
+                data["prompt"] = prompt
+            with open(output, "w") as f:
+                json.dump(data, f, indent=2)
+            console.print(f"  Results written to: {output}")
+        return
+
+    # Resolve judge: CLI flag > config > smart default
+    if judge is None:
+        config = (ctx.obj or {}).get("config")
+        judge = _resolve_default_judge(config)
+
     # Auto-detect dimensions when not specified
     if dimensions:
         dims = list(dimensions)

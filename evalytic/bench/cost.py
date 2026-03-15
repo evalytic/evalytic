@@ -21,6 +21,16 @@ JUDGE_COSTS: dict[str, float] = {
     "claude-haiku": 0.001,
     "claude-haiku-4-5": 0.001,
     "claude-opus-4-6": 0.005,
+    # fal.ai OpenRouter (same underlying models, mapped names)
+    "google/gemini-2.5-flash": 0.0006,
+    "google/gemini-2.5-pro": 0.006,
+    "google/gemini-3-flash-preview": 0.0006,
+    "openai/gpt-5.2": 0.0025,
+    "openai/gpt-4o": 0.006,
+    "openai/gpt-4o-mini": 0.0012,
+    "anthropic/claude-sonnet-4-6": 0.004,
+    "anthropic/claude-haiku-4-5": 0.0012,
+    "anthropic/claude-opus-4-6": 0.006,
 }
 
 
@@ -28,9 +38,14 @@ def _resolve_judge_model(judge: str) -> str:
     """Extract the model name from a judge string for cost lookup.
 
     ``"openai/gpt-5.2"`` -> ``"gpt-5.2"``, ``"gemini-2.5-flash"`` -> ``"gemini-2.5-flash"``.
+    ``"fal/gemini-2.5-flash"`` -> ``"google/gemini-2.5-flash"`` (via model map).
     """
     if "/" in judge:
-        return judge.split("/", 1)[1]
+        parts = judge.split("/", 1)
+        if parts[0] == "fal":
+            from .judge import _FAL_MODEL_MAP
+            return _FAL_MODEL_MAP.get(parts[1], parts[1])
+        return parts[1]
     return judge
 
 

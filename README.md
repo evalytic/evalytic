@@ -104,11 +104,20 @@ evaly bench -m flux-schnell -p "A cat" \
 
 Two judges score in parallel. If they disagree, a third breaks the tie.
 
-## Optional Extras
+## Metrics
+
+Local deterministic metrics auto-enabled when installed:
 
 ```bash
-pip install "evalytic[metrics]"  # CLIP Score + LPIPS + ArcFace (~2GB)
+pip install "evalytic[metrics]"  # CLIP Score + LPIPS + ArcFace + NIMA (~2GB)
+pip install "evalytic[ocr]"      # OCR accuracy for text rendering prompts
 pip install "evalytic[all]"      # Everything
+```
+
+Run without VLM judges (free, deterministic):
+
+```bash
+evaly bench -m flux-schnell -p "A cat" --no-judge
 ```
 
 ## Configuration
