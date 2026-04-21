@@ -115,14 +115,11 @@ class ConsensusJudge:
                     db, self._judge_names[1], agreement="degraded",
                 )
             else:
-                # Both failed → zero score
-                consensus_results[dim] = DimensionResult(
-                    dimension=dim,
-                    score=0.0,
-                    confidence=0.0,
-                    explanation="All judges failed for this dimension.",
-                    agreement="degraded",
-                    judge_scores={},
+                # Both primary judges failed — raise so runner records as error
+                from ..exceptions import JudgeError
+                raise JudgeError(
+                    f"All judges failed for dimension '{dim}' — "
+                    f"judges: {self._judge_names[:2]}"
                 )
 
         # Step 2: Tiebreaker for disputed dimensions

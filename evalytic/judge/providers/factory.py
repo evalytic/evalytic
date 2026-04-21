@@ -8,6 +8,7 @@ from typing import Any
 from ...exceptions import ValidationError
 from .anthropic import AnthropicProvider
 from .base import BaseProvider
+from .bedrock import BedrockProvider
 from .gemini import GeminiProvider
 from .openai_compat import OpenAICompatProvider
 
@@ -43,6 +44,10 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     "fal": {
         "base_url": "https://fal.run/openrouter/router/openai/v1",
         "env_key": "FAL_KEY",
+    },
+    "bedrock": {
+        "base_url": "",
+        "env_key": "BEDROCK_REGION",
     },
 }
 
@@ -131,6 +136,8 @@ def _parse_judge_string(judge: str) -> tuple[str, str]:
             return "openai", judge
     if judge.startswith("claude"):
         return "anthropic", judge
+    if judge.startswith("anthropic."):
+        return "bedrock", judge
 
     # Default to gemini for backward compat
     return "gemini", judge
@@ -166,6 +173,9 @@ def create_provider(
         provider = OpenAICompatProvider(model, resolved_api_key, resolved_base_url, provider_name)
     elif provider_name == "anthropic":
         provider = AnthropicProvider(model, resolved_api_key, resolved_base_url)
+    elif provider_name == "bedrock":
+        region = resolved_api_key or "eu-central-1"
+        provider = BedrockProvider(model, region=region)
     else:
         raise ValidationError(f"Unknown provider: {provider_name!r}")
 

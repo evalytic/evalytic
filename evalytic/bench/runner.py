@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -171,8 +172,14 @@ def run_bench(
         _log(f"Models: {[e.short_name for e in entries]}")
 
         # Set up cache dir
-        cache_path = Path(cache_dir or "~/.evalytic/cache").expanduser() / run_name
-        cache_path.mkdir(parents=True, exist_ok=True)
+        cache_root = Path(cache_dir or "~/.evalytic/cache").expanduser()
+        cache_path = cache_root / run_name
+        try:
+            cache_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            fallback_root = Path(tempfile.gettempdir()) / "evalytic-cache"
+            cache_path = fallback_root / run_name
+            cache_path.mkdir(parents=True, exist_ok=True)
 
         # ---- GENERATE (cross-model parallel) ----
         all_tasks: list[tuple[Any, dict[str, Any]]] = []

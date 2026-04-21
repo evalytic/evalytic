@@ -15,7 +15,7 @@ from ..report.terminal import console, score_color
 
 
 def _load_report(path: str) -> dict[str, Any]:
-    """Load and validate a bench report JSON file."""
+    """Load and validate an Evalytic report JSON file."""
     p = Path(path)
     if not p.exists():
         raise ValidationError(f"Report file not found: {path}")
@@ -29,19 +29,23 @@ def _load_report(path: str) -> dict[str, Any]:
 
 
 def _parse_dimension_thresholds(values: tuple[str, ...]) -> dict[str, float]:
-    """Parse 'dim:val' pairs into a dict."""
+    """Parse 'name:val' pairs into a dict."""
     result: dict[str, float] = {}
     for v in values:
         if ":" not in v:
             raise ValidationError(
-                f"Invalid dimension threshold format: {v!r}. Expected 'dimension:value' (e.g. visual_quality:4.0)"
+                f"Invalid dimension threshold format: {v!r}. Expected 'name:value' (e.g. visual_quality:4.0)"
             )
-        dim, val_str = v.split(":", 1)
+        name, val_str = v.split(":", 1)
         try:
-            result[dim.strip()] = float(val_str.strip())
+            result[name.strip()] = float(val_str.strip())
         except ValueError:
             raise ValidationError(f"Invalid threshold value: {val_str!r} in {v!r}")
     return result
+
+
+def _report_type(data: dict[str, Any]) -> str:
+    return str(data.get("eval_type") or "bench")
 
 
 def _build_item_index(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -82,6 +86,10 @@ def _extract_scores(scores_data: Any) -> dict[str, float]:
     "--dimension-threshold", multiple=True,
     help="Per-dimension threshold as dim:value (e.g. visual_quality:4.0).",
 )
+@click.option(
+    "--metric-threshold", multiple=True,
+    help="Per-metric threshold as metric:value (e.g. faithfulness:0.8).",
+)
 @click.option("--baseline", default=None, help="Path to baseline report JSON for regression detection.")
 @click.option(
     "--regression-threshold", type=float, default=0.3,
@@ -100,6 +108,7 @@ def gate(
     report: str,
     threshold: float | None,
     dimension_threshold: tuple[str, ...],
+    metric_threshold: tuple[str, ...],
     baseline: str | None,
     regression_threshold: float,
     min_confidence: float | None,
@@ -118,6 +127,7 @@ def gate(
     # Parse dimension thresholds
     try:
         dim_thresholds = _parse_dimension_thresholds(dimension_threshold)
+        metric_thresholds = _parse_dimension_thresholds(metric_threshold)
     except EvalyticError as exc:
         if json_output:
             _write_json(json_output, {"status": "error", "error": str(exc), "checks": []})
@@ -136,14 +146,60 @@ def gate(
             else:
                 console.print(f"[bold red]Error:[/bold red] {exc}")
             sys.exit(2)
+        if _report_type(baseline_data) != _report_type(data):
+            exc = ValidationError(
+                f"Baseline report type mismatch: {_report_type(data)!r} vs {_report_type(baseline_data)!r}."
+            )
+            if json_output:
+                _write_json(json_output, {"status": "error", "error": str(exc), "checks": []})
+            else:
+                console.print(f"[bold red]Error:[/bold red] {exc}")
+            sys.exit(2)
+
+    report_type = _report_type(data)
+    if report_type == "bench":
+        if metric_thresholds:
+            exc = ValidationError("--metric-threshold is only supported for text, rag, and agent reports.")
+            if json_output:
+                _write_json(json_output, {"status": "error", "error": str(exc), "checks": []})
+            else:
+                console.print(f"[bold red]Error:[/bold red] {exc}")
+            sys.exit(2)
+    else:
+        invalid_options: list[str] = []
+        if threshold is not None:
+            invalid_options.append("--threshold")
+        if dim_thresholds:
+            invalid_options.append("--dimension-threshold")
+        if min_confidence is not None:
+            invalid_options.append("--min-confidence")
+        if invalid_options:
+            exc = ValidationError(
+                f"{', '.join(invalid_options)} only works with bench reports. "
+                f"Use --metric-threshold for {report_type} reports."
+            )
+            if json_output:
+                _write_json(json_output, {"status": "error", "error": str(exc), "checks": []})
+            else:
+                console.print(f"[bold red]Error:[/bold red] {exc}")
+            sys.exit(2)
 
     # Check if any checks are configured
-    has_checks = threshold is not None or dim_thresholds or baseline_data is not None or min_confidence is not None
+    has_checks = (
+        threshold is not None
+        or dim_thresholds
+        or metric_thresholds
+        or baseline_data is not None
+        or min_confidence is not None
+    )
     if not has_checks:
         if json_output:
             _write_json(json_output, {"status": "pass", "checks": [], "warning": "No checks configured."})
         else:
-            console.print("[yellow]Warning:[/yellow] No checks configured. Pass --threshold, --dimension-threshold, or --baseline.")
+            if report_type == "bench":
+                console.print("[yellow]Warning:[/yellow] No checks configured. Pass --threshold, --dimension-threshold, or --baseline.")
+            else:
+                console.print("[yellow]Warning:[/yellow] No checks configured. Pass --metric-threshold or --baseline.")
         sys.exit(0)
 
     summary = data["summary"]
@@ -152,97 +208,147 @@ def gate(
 
     # Rich table (only used when not json-only)
     results_table = Table(title="Gate Results", show_lines=True)
-    results_table.add_column("Model", style="bold")
+    results_table.add_column("Target", style="bold")
     results_table.add_column("Check")
     results_table.add_column("Value", justify="center")
     results_table.add_column("Threshold", justify="center")
     results_table.add_column("Result", justify="center")
 
-    for model_name, model_data in summary.items():
-        overall = model_data.get("overall_score", 0.0)
-        dim_avgs = model_data.get("dimension_averages", {})
+    if report_type == "bench":
+        for model_name, model_data in summary.items():
+            overall = model_data.get("overall_score", 0.0)
+            dim_avgs = model_data.get("dimension_averages", {})
 
-        # Overall threshold check
-        if threshold is not None:
-            passed = overall >= threshold
-            if not passed:
-                all_passed = False
-            checks.append({
-                "type": "threshold", "model": model_name,
-                "check": "overall_score", "value": overall,
-                "threshold": threshold, "passed": passed,
-            })
-            color = score_color(overall)
-            results_table.add_row(
-                model_name, "overall_score",
-                f"[{color}]{overall:.2f}[/{color}]", f"{threshold:.2f}",
-                "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
-            )
+            # Overall threshold check
+            if threshold is not None:
+                passed = overall >= threshold
+                if not passed:
+                    all_passed = False
+                checks.append({
+                    "type": "threshold", "model": model_name,
+                    "check": "overall_score", "value": overall,
+                    "threshold": threshold, "passed": passed,
+                })
+                color = score_color(overall)
+                results_table.add_row(
+                    model_name, "overall_score",
+                    f"[{color}]{overall:.2f}[/{color}]", f"{threshold:.2f}",
+                    "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
+                )
 
-        # Dimension threshold checks
-        for dim, min_val in dim_thresholds.items():
-            actual = dim_avgs.get(dim, 0.0)
+            # Dimension threshold checks
+            for dim, min_val in dim_thresholds.items():
+                actual = dim_avgs.get(dim, 0.0)
+                passed = actual >= min_val
+                if not passed:
+                    all_passed = False
+                checks.append({
+                    "type": "dimension_threshold", "model": model_name,
+                    "dimension": dim, "value": actual,
+                    "threshold": min_val, "passed": passed,
+                })
+                color = score_color(actual)
+                results_table.add_row(
+                    model_name, dim,
+                    f"[{color}]{actual:.2f}[/{color}]", f"{min_val:.2f}",
+                    "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
+                )
+
+            # Confidence check
+            if min_confidence is not None:
+                avg_conf = model_data.get("avg_confidence", 1.0)
+                passed = avg_conf >= min_confidence
+                if not passed:
+                    all_passed = False
+                checks.append({
+                    "type": "confidence", "model": model_name,
+                    "value": avg_conf, "threshold": min_confidence, "passed": passed,
+                })
+                conf_color = "green" if avg_conf >= 0.8 else ("yellow" if avg_conf >= 0.5 else "red")
+                results_table.add_row(
+                    model_name, "avg_confidence",
+                    f"[{conf_color}]{avg_conf:.2f}[/{conf_color}]", f"{min_confidence:.2f}",
+                    "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
+                )
+
+            # Regression checks (average)
+            if baseline_data is not None:
+                baseline_summary = baseline_data.get("summary", {})
+                baseline_model = baseline_summary.get(model_name)
+                if baseline_model:
+                    baseline_dims = baseline_model.get("dimension_averages", {})
+                    for dim, current_val in dim_avgs.items():
+                        baseline_val = baseline_dims.get(dim)
+                        if baseline_val is not None:
+                            drop = baseline_val - current_val
+                            passed = drop <= regression_threshold
+                            if not passed:
+                                all_passed = False
+                            checks.append({
+                                "type": "regression", "model": model_name,
+                                "dimension": dim, "baseline": baseline_val,
+                                "current": current_val, "drop": round(drop, 2),
+                                "threshold": regression_threshold, "passed": passed,
+                            })
+                            color = "green" if drop <= 0 else ("yellow" if drop <= regression_threshold else "red")
+                            results_table.add_row(
+                                model_name, f"regression:{dim}",
+                                f"[{color}]{drop:+.2f}[/{color}]", f"{regression_threshold:.2f}",
+                                "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
+                            )
+    else:
+        metric_avgs = summary.get("metric_averages", {})
+        for metric_id, min_val in metric_thresholds.items():
+            actual = float(metric_avgs.get(metric_id, 0.0))
             passed = actual >= min_val
             if not passed:
                 all_passed = False
             checks.append({
-                "type": "dimension_threshold", "model": model_name,
-                "dimension": dim, "value": actual,
-                "threshold": min_val, "passed": passed,
+                "type": "metric_threshold",
+                "metric": metric_id,
+                "value": actual,
+                "threshold": min_val,
+                "passed": passed,
             })
-            color = score_color(actual)
             results_table.add_row(
-                model_name, dim,
-                f"[{color}]{actual:.2f}[/{color}]", f"{min_val:.2f}",
+                report_type,
+                metric_id,
+                f"{actual:.4f}",
+                f"{min_val:.4f}",
                 "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
             )
 
-        # Confidence check
-        if min_confidence is not None:
-            avg_conf = model_data.get("avg_confidence", 1.0)
-            passed = avg_conf >= min_confidence
-            if not passed:
-                all_passed = False
-            checks.append({
-                "type": "confidence", "model": model_name,
-                "value": avg_conf, "threshold": min_confidence, "passed": passed,
-            })
-            conf_color = "green" if avg_conf >= 0.8 else ("yellow" if avg_conf >= 0.5 else "red")
-            results_table.add_row(
-                model_name, "avg_confidence",
-                f"[{conf_color}]{avg_conf:.2f}[/{conf_color}]", f"{min_confidence:.2f}",
-                "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
-            )
-
-        # Regression checks (average)
         if baseline_data is not None:
-            baseline_summary = baseline_data.get("summary", {})
-            baseline_model = baseline_summary.get(model_name)
-            if baseline_model:
-                baseline_dims = baseline_model.get("dimension_averages", {})
-                for dim, current_val in dim_avgs.items():
-                    baseline_val = baseline_dims.get(dim)
-                    if baseline_val is not None:
-                        drop = baseline_val - current_val
-                        passed = drop <= regression_threshold
-                        if not passed:
-                            all_passed = False
-                        checks.append({
-                            "type": "regression", "model": model_name,
-                            "dimension": dim, "baseline": baseline_val,
-                            "current": current_val, "drop": round(drop, 2),
-                            "threshold": regression_threshold, "passed": passed,
-                        })
-                        color = "green" if drop <= 0 else ("yellow" if drop <= regression_threshold else "red")
-                        results_table.add_row(
-                            model_name, f"regression:{dim}",
-                            f"[{color}]{drop:+.2f}[/{color}]", f"{regression_threshold:.2f}",
-                            "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
-                        )
+            baseline_metrics = baseline_data.get("summary", {}).get("metric_averages", {})
+            for metric_id, current_val in metric_avgs.items():
+                baseline_val = baseline_metrics.get(metric_id)
+                if baseline_val is None:
+                    continue
+                drop = float(baseline_val) - float(current_val)
+                passed = drop <= regression_threshold
+                if not passed:
+                    all_passed = False
+                checks.append({
+                    "type": "regression",
+                    "metric": metric_id,
+                    "baseline": baseline_val,
+                    "current": current_val,
+                    "drop": round(drop, 4),
+                    "threshold": regression_threshold,
+                    "passed": passed,
+                })
+                color = "green" if drop <= 0 else ("yellow" if drop <= regression_threshold else "red")
+                results_table.add_row(
+                    report_type,
+                    f"regression:{metric_id}",
+                    f"[{color}]{drop:+.4f}[/{color}]",
+                    f"{regression_threshold:.4f}",
+                    "[green]PASS[/green]" if passed else "[red]FAIL[/red]",
+                )
 
     # Per-item regression checks
     item_regressions: list[dict[str, Any]] = []
-    if baseline_data is not None:
+    if baseline_data is not None and report_type == "bench":
         current_items = _build_item_index(data)
         baseline_items = _build_item_index(baseline_data)
 
@@ -298,6 +404,7 @@ def gate(
     if json_output:
         result = {
             "status": status,
+            "eval_type": report_type,
             "checks": checks,
             "summary": {
                 "total_checks": len(checks),

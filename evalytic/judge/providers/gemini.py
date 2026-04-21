@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from ..common import parse_response
+from ..common import extract_response_cost, parse_response
 from .base import BaseProvider
 
 
@@ -24,7 +24,9 @@ class GeminiProvider(BaseProvider):
         user_prompt: str,
         system_prompt: str,
         images: list[tuple[str, str]] | None = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self.last_cost = 0.0
         parts: list[dict[str, Any]] = []
         if images:
             for b64, mime in images:
@@ -43,6 +45,7 @@ class GeminiProvider(BaseProvider):
 
         resp = self._client.post(url, json=payload)
         resp.raise_for_status()
+        self.last_cost = extract_response_cost(resp)
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         return parse_response(text)
 

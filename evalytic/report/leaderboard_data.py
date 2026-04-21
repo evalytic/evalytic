@@ -60,6 +60,9 @@ LEADERBOARD_MODELS: dict[str, LeaderboardModelMeta] = {
     # OpenAI
     "gpt-image-1":      LeaderboardModelMeta("GPT Image 1",            "OpenAI",   1115, seed_supported=False),
     "gpt-image-1-mini": LeaderboardModelMeta("GPT Image 1 Mini",       "OpenAI",   1104, seed_supported=False),
+    "gpt-image-1.5":    LeaderboardModelMeta("GPT Image 1.5",          "OpenAI",   None, seed_supported=False),
+    # Luma
+    "luma-photon":      LeaderboardModelMeta("Luma Photon",            "Luma",     None, seed_supported=False),
     # Other
     "z-image-turbo":    LeaderboardModelMeta("Z-Image Turbo",          "Other",    1080),
     "glm-image":        LeaderboardModelMeta("GLM Image",              "Other",    1012, license_type="open"),

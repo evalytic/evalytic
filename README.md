@@ -1,31 +1,56 @@
 # Evalytic
 
-**Evals for visual AI.** Automated quality evaluation for AI-generated images and video.
+**Evals for AI outputs.** Automated quality evaluation for images, video, text, RAG, and agent runs.
 
 [![PyPI](https://img.shields.io/pypi/v/evalytic)](https://pypi.org/project/evalytic/)
 [![Python](https://img.shields.io/pypi/pyversions/evalytic)](https://pypi.org/project/evalytic/)
 [![License](https://img.shields.io/pypi/l/evalytic)](https://github.com/evalytic/evalytic/blob/main/LICENSE)
 
-Know if your AI-generated visuals are good — before your users tell you they're not.
+Know if your AI outputs are good before your users tell you they're not. One SDK for visual generation, LLM text, RAG pipelines, and tool-using agents.
 
 ```bash
 pip install evalytic
 
-evaly bench \
-  -m flux-schnell -m flux-dev -m flux-pro \
-  -p "A photorealistic cat on a windowsill" \
-  -o report.html --yes
+# Visual: compare image generation models
+evaly bench -m flux-schnell -m flux-dev -m flux-pro \
+  -p "A product photo on marble countertop" --yes
+
+# RAG: evaluate retrieval-augmented answers
+evaly rag eval \
+  --query "What is Evalytic?" \
+  --response "Evalytic evaluates AI outputs." \
+  --context "Evalytic is an evaluation platform." \
+  --metrics faithfulness,answer_relevancy
+
+# Text: evaluate LLM outputs
+evaly text eval \
+  --input "Translate: Hello" --output-text "Merhaba" --expected "Merhaba" \
+  --metrics exact_match,semantic_similarity
+
+# Agent: evaluate tool-using agent runs
+evaly agent eval \
+  --input "Find the score" --final-output "0.9" \
+  --tool-call search --expected-tool search
 ```
 
 ## What It Does
 
-Evalytic benchmarks AI image generation models by generating images, scoring them with VLM judges (Gemini, GPT, Claude, Ollama), and producing rich reports — all in one command.
+Evalytic scores AI outputs across four eval domains with the same consensus-judge architecture:
 
-- **Model Selection** — Compare Flux Schnell vs Dev vs Pro with real prompts
-- **Prompt Optimization** — Measure how well models follow your prompts
-- **Regression Detection** — Catch quality drops when models update
-- **CI/CD Quality Gate** — Block deploys when image quality falls below threshold
-- **7 Semantic Dimensions** — visual_quality, prompt_adherence, text_rendering, input_fidelity, transformation_quality, artifact_detection, identity_preservation
+- **Visual** (images, video) — 7 semantic dimensions scored by VLM judges + deterministic metrics (sharpness, CLIP, LPIPS, ArcFace, NIMA, TOPIQ)
+- **RAG** — reference-free `faithfulness` + `answer_relevancy`; reference-based `context_precision` + `context_recall`
+- **Text** — `factual_correctness`, `semantic_similarity`, `g_eval` (custom rubric), BLEU, ROUGE, exact_match, levenshtein, string_presence
+- **Agent** — `tool_call_accuracy`, `goal_accuracy`, `step_efficiency`
+
+VLM / LLM judges (Gemini, GPT, Claude, Ollama) + local metrics work together or independently. Every domain supports consensus mode (2+1 adaptive multi-judge).
+
+### Use Cases
+
+- **Model Selection** — Compare any fal.ai / OpenAI / Anthropic models head-to-head
+- **RAG Hallucination Detection** — Claim-level faithfulness against retrieved context
+- **Prompt Optimization** — Measure output quality across semantic dimensions
+- **Regression Detection** — Catch quality drops when models, prompts, or retrievers update
+- **CI/CD Quality Gate** — Block deploys when any metric falls below threshold (visual OR text OR agent)
 - **Consensus Judging** — Multi-judge scoring with automatic agreement analysis
 
 ## Quickstart
@@ -44,53 +69,65 @@ evaly demo face         # Face identity preservation comparison
 evaly demo flagship     # Flux Schnell vs Dev vs Pro cost/quality
 ```
 
-### 3. Set API Keys
+### 3. Score an Existing Image
 
 ```bash
-export FAL_KEY=your_fal_key          # fal.ai for image generation
-export GEMINI_API_KEY=your_gemini_key  # Default judge
+# Local metrics only (free, no API key)
+evaly eval --image output.png --prompt "A sunset over mountains" --no-judge
+
+# With VLM judge
+export GEMINI_API_KEY=your_gemini_key
+evaly eval --image output.png --prompt "A sunset over mountains" --yes
 ```
 
-### 4. Run
+### 4. Benchmark Models
 
 ```bash
-# Single model benchmark
-evaly bench -m flux-schnell -p "A cat sitting on a windowsill" --yes
+export FAL_KEY=your_fal_key
 
-# Compare models with HTML report
+# Text-to-image
 evaly bench -m flux-schnell -m flux-dev -m flux-pro \
-  -p prompts.json -o report.html --review
+  -p "A cat sitting on a windowsill" --yes
 
-# img2img benchmark
+# Image-to-image
 evaly bench -m flux-kontext -m seedream-edit -m reve-edit \
-  -p prompts.json --input product.jpg --yes
+  --inputs product.jpg -p "Place on a marble countertop" --yes
 
-# Score an existing image
-evaly eval --image output.png --prompt "A sunset over mountains"
+# Metrics only, no VLM judge
+evaly bench -m flux-schnell -m flux-dev -p "A cat" --no-judge
+```
 
-# CI/CD quality gate
-evaly gate --report report.json --threshold 3.5
+### 5. Interactive Setup
+
+```bash
+evaly init   # Guided setup: use case, API keys, config file
 ```
 
 ## CLI Commands
 
-| Command | Description |
-|---------|-------------|
-| `evaly demo` | Browse real benchmark showcases (no API key needed) |
-| `evaly bench` | Generate, score, and report in one command |
-| `evaly eval` | Score a single image without generation |
-| `evaly gate` | CI/CD quality gate with pass/fail exit codes |
+| Command | Domain | Description |
+|---------|--------|-------------|
+| `evaly init` | Any | Interactive setup wizard |
+| `evaly demo` | Visual | Browse real benchmark showcases (no API key needed) |
+| `evaly bench` | Visual | Generate, score, and report in one command |
+| `evaly eval` | Visual | Score a single image without generation |
+| `evaly rag eval` | RAG | Evaluate RAG answers (reference-free + reference-based) |
+| `evaly text eval` | Text | Evaluate LLM outputs (factual, semantic, BLEU, ROUGE, G-Eval) |
+| `evaly agent eval` | Agent | Evaluate tool-using agent runs |
+| `evaly compare` | All | Delta between two report files (same-type only) |
+| `evaly gate` | All | CI/CD quality gate (`--threshold` for visual, `--metric-threshold` for text/RAG/agent) |
+| `evaly dataset` | All | Manage evaluation datasets (rag, text, agent, visual) |
 
 ## Judges
 
 Any VLM that can analyze images works as a judge:
 
 ```bash
-evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash        # Default
-evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-pro           # Gemini Pro
-evaly bench -m flux-schnell -p "A cat" -j openai/gpt-5.2           # OpenAI
-evaly bench -m flux-schnell -p "A cat" -j anthropic/claude-sonnet-4-6  # Anthropic
-evaly bench -m flux-schnell -p "A cat" -j ollama/qwen2.5-vl:7b    # Local
+evaly bench -m flux-schnell -p "A cat" -j gemini-2.5-flash            # Default
+evaly bench -m flux-schnell -p "A cat" -j openai/gpt-5.2              # OpenAI
+evaly bench -m flux-schnell -p "A cat" -j anthropic/claude-sonnet-4-6 # Anthropic
+evaly bench -m flux-schnell -p "A cat" -j fal/gemini-2.5-flash        # Via fal.ai (single key)
+evaly bench -m flux-schnell -p "A cat" -j ollama/qwen2.5-vl:7b        # Local
 ```
 
 ### Consensus Mode
@@ -104,21 +141,16 @@ evaly bench -m flux-schnell -p "A cat" \
 
 Two judges score in parallel. If they disagree, a third breaks the tie.
 
-## Metrics
-
-Local deterministic metrics auto-enabled when installed:
+## Optional Extras
 
 ```bash
-pip install "evalytic[metrics]"  # CLIP Score + LPIPS + ArcFace + NIMA (~2GB)
-pip install "evalytic[ocr]"      # OCR accuracy for text rendering prompts
-pip install "evalytic[all]"      # Everything
+pip install "evalytic[metrics]"      # CLIP + LPIPS + ArcFace + NIMA + TOPIQ (~2GB)
+pip install "evalytic[ocr]"          # OCR text accuracy (pytesseract)
+pip install "evalytic[embeddings]"   # Local sentence-transformers for RAG/text embeddings (~500MB)
+pip install "evalytic[all]"          # Everything
 ```
 
-Run without VLM judges (free, deterministic):
-
-```bash
-evaly bench -m flux-schnell -p "A cat" --no-judge
-```
+For RAG `answer_relevancy` and text `semantic_similarity`, either install `evalytic[embeddings]` or set `OPENAI_API_KEY` / `FAL_KEY` (embeddings auto-resolve).
 
 ## Configuration
 
@@ -133,6 +165,26 @@ gemini = "your_gemini_key"
 judge = "gemini-2.5-flash"
 dimensions = ["visual_quality", "prompt_adherence"]
 concurrency = 4
+
+[bench.dimension_weights]
+input_fidelity = 0.5
+visual_quality = 0.1
+
+[rag]
+judge = "gemini-2.5-flash"
+judges = ["gemini-2.5-flash", "openai/gpt-5.2"]  # Consensus mode
+
+[rag.thresholds]
+faithfulness = 0.8
+answer_relevancy = 0.7
+
+[text.thresholds]
+factual_correctness = 0.8
+semantic_similarity = 0.7
+
+[embeddings]
+provider = "sentence-transformers"  # or "openai" / "fal"
+model = "all-MiniLM-L6-v2"
 ```
 
 ## Documentation

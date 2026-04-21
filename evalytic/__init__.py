@@ -1,4 +1,4 @@
-"""Evalytic -- Evals for visual AI.
+"""Evalytic -- Evals for AI outputs.
 
 Quick start (CLI):
 
@@ -23,8 +23,9 @@ Python API:
     print(result.display_score)  # "3.8/5"
 """
 
-__version__ = "0.3.11"
+__version__ = "0.4.1"
 
+from .agent import AgentTestCase, AgentToolCall, evaluate_agent
 from .client import _get_client, init
 from .compare import compare
 from .dataset import Dataset, init_dataset
@@ -37,6 +38,17 @@ from .exceptions import (
     ValidationError,
 )
 from .experiment import Eval
+from .text import (
+    MetricEvalReport,
+    MetricEvalResult,
+    MetricResult,
+    RAGTestCase,
+    RetrievedChunk,
+    TextEvalResult,
+    TextTestCase,
+    evaluate_rag,
+    evaluate_text,
+)
 from .types import CompareReport, DimensionScore, EvalResult, ExperimentResult
 from .bench.registry import register_model
 from .bench.runner import run_bench as bench
@@ -51,10 +63,22 @@ __all__ = [
     "compare",
     "bench",
     "register_model",
+    "evaluate_rag",
+    "evaluate_text",
+    "evaluate_agent",
     # Classes
     "Eval",
     "Dataset",
     "init_dataset",
+    "RetrievedChunk",
+    "RAGTestCase",
+    "TextTestCase",
+    "MetricResult",
+    "MetricEvalResult",
+    "TextEvalResult",
+    "MetricEvalReport",
+    "AgentTestCase",
+    "AgentToolCall",
     # Types
     "DimensionScore",
     "EvalResult",

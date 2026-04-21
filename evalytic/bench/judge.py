@@ -282,8 +282,12 @@ class Judge:
         self.api_key = self._provider.api_key
 
         # Share the provider's httpx client for image fetching too.
-        # This keeps a single _client attribute (backward compat with tests).
-        self._client = self._provider._client
+        # Bedrock/other providers may not have an httpx client, so fallback.
+        if hasattr(self._provider._client, 'get'):
+            self._client = self._provider._client
+        else:
+            import httpx
+            self._client = httpx.Client(timeout=60)
 
     def score(
         self,

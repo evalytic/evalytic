@@ -273,10 +273,10 @@ class TestRegistry:
     def test_list_models_filter(self) -> None:
         t2i = list_models(pipeline="text2img")
         assert all(e.pipeline == "text2img" for e in t2i)
-        assert len(t2i) == 37
+        assert len(t2i) == sum(1 for e in MODEL_REGISTRY.values() if e.pipeline == "text2img")
 
         i2i = list_models(pipeline="img2img")
-        assert len(i2i) == 7
+        assert len(i2i) == sum(1 for e in MODEL_REGISTRY.values() if e.pipeline == "img2img")
 
     def test_estimate_cost(self) -> None:
         cost = estimate_cost("flux-schnell", 10)
@@ -1164,60 +1164,97 @@ class TestSharpnessScorer:
 
 
 # -----------------------------------------------------------------------
-# Aesthetic scorer
+# pyiqa scorers (NIMA, ARNIQA, CLIPIQA+, MUSIQ)
 # -----------------------------------------------------------------------
 
 
-class TestAestheticScorer:
-    def test_importable(self) -> None:
-        from evalytic.bench.metrics import AestheticScorer
+class TestPyiqaScorers:
+    def test_nima_importable(self) -> None:
+        from evalytic.bench.metrics import NimaScorer
+        assert NimaScorer is not None
 
-        assert AestheticScorer is not None
+    def test_arniqa_importable(self) -> None:
+        from evalytic.bench.metrics import ARNIQAScorer
+        assert ARNIQAScorer is not None
 
-    def test_requires_metrics(self) -> None:
-        """AestheticScorer raises if evalytic[metrics] not installed."""
+    def test_topiq_importable(self) -> None:
+        from evalytic.bench.metrics import TOPIQScorer
+        assert TOPIQScorer is not None
+
+    def test_musiq_importable(self) -> None:
+        from evalytic.bench.metrics import MUSIQScorer
+        assert MUSIQScorer is not None
+
+    def test_aesthetic_scorer_removed(self) -> None:
+        """AestheticScorer (LAION) has been removed."""
+        assert not hasattr(__import__("evalytic.bench.metrics", fromlist=["AestheticScorer"]), "AestheticScorer")
+
+    def test_requires_pyiqa(self) -> None:
+        """pyiqa scorers raise if pyiqa not installed."""
         from evalytic.bench import metrics as m
 
-        orig = m.METRICS_AVAILABLE
+        orig = m.NIMA_AVAILABLE
         try:
-            m.METRICS_AVAILABLE = False
-            with pytest.raises(RuntimeError, match="evalytic\\[metrics\\]"):
-                m.AestheticScorer()
+            m.NIMA_AVAILABLE = False
+            for cls in (m.NimaScorer, m.ARNIQAScorer, m.TOPIQScorer, m.MUSIQScorer):
+                with pytest.raises(RuntimeError, match="pyiqa"):
+                    cls()
         finally:
-            m.METRICS_AVAILABLE = orig
+            m.NIMA_AVAILABLE = orig
 
-    def test_reuses_clip_scorer(self) -> None:
-        """AestheticScorer accepts clip_scorer parameter."""
-        from evalytic.bench.metrics import AestheticScorer, METRICS_AVAILABLE
-
-        if not METRICS_AVAILABLE:
-            pytest.skip("evalytic[metrics] not installed")
-        scorer = AestheticScorer(clip_scorer=None)
-        assert scorer._clip_scorer is None
-
-    def test_score_returns_float_in_range(self, tmp_path: Path) -> None:
-        """AestheticScorer.score() returns float in [0, 1]."""
-        from evalytic.bench.metrics import AestheticScorer, METRICS_AVAILABLE
-
-        if not METRICS_AVAILABLE:
-            pytest.skip("evalytic[metrics] not installed")
+    def test_nima_score_returns_float_in_range(self, tmp_path: Path) -> None:
+        from evalytic.bench.metrics import NimaScorer, NIMA_AVAILABLE
+        if not NIMA_AVAILABLE:
+            pytest.skip("pyiqa not installed")
         from PIL import Image
-
         img = Image.new("RGB", (256, 256), (128, 100, 80))
         path = str(tmp_path / "test.png")
         img.save(path)
-
-        scorer = AestheticScorer()
-        val = scorer.score(path)
+        val = NimaScorer().score(path)
         assert isinstance(val, float)
         assert 0.0 <= val <= 1.0
 
-    def test_compute_metrics_aesthetic(self, tmp_path: Path) -> None:
-        """compute_metrics includes aesthetic/nima score when requested."""
-        from evalytic.bench.metrics import METRICS_AVAILABLE, NIMA_AVAILABLE
+    def test_arniqa_score_returns_float_in_range(self, tmp_path: Path) -> None:
+        from evalytic.bench.metrics import ARNIQAScorer, NIMA_AVAILABLE
+        if not NIMA_AVAILABLE:
+            pytest.skip("pyiqa not installed")
+        from PIL import Image
+        img = Image.new("RGB", (256, 256), (128, 100, 80))
+        path = str(tmp_path / "test.png")
+        img.save(path)
+        val = ARNIQAScorer().score(path)
+        assert isinstance(val, float)
+        assert 0.0 <= val <= 1.0
 
-        if not METRICS_AVAILABLE and not NIMA_AVAILABLE:
-            pytest.skip("evalytic[metrics] not installed")
+    def test_topiq_score_returns_float_in_range(self, tmp_path: Path) -> None:
+        from evalytic.bench.metrics import TOPIQScorer, NIMA_AVAILABLE
+        if not NIMA_AVAILABLE:
+            pytest.skip("pyiqa not installed")
+        from PIL import Image
+        img = Image.new("RGB", (256, 256), (128, 100, 80))
+        path = str(tmp_path / "test.png")
+        img.save(path)
+        val = TOPIQScorer().score(path)
+        assert isinstance(val, float)
+        assert 0.0 <= val <= 1.0
+
+    def test_musiq_score_returns_float_in_range(self, tmp_path: Path) -> None:
+        from evalytic.bench.metrics import MUSIQScorer, NIMA_AVAILABLE
+        if not NIMA_AVAILABLE:
+            pytest.skip("pyiqa not installed")
+        from PIL import Image
+        img = Image.new("RGB", (256, 256), (128, 100, 80))
+        path = str(tmp_path / "test.png")
+        img.save(path)
+        val = MUSIQScorer().score(path)
+        assert isinstance(val, float)
+        assert 0.0 <= val <= 1.0
+
+    def test_compute_metrics_aesthetic_alias(self, tmp_path: Path) -> None:
+        """'aesthetic' metric type maps to NimaScorer (nima_score)."""
+        from evalytic.bench.metrics import NIMA_AVAILABLE
+        if not NIMA_AVAILABLE:
+            pytest.skip("pyiqa not installed")
         from PIL import Image
         from evalytic.bench.metrics import compute_metrics
         from evalytic.bench.types import BenchItem, ImageResult
@@ -1240,11 +1277,46 @@ class TestAestheticScorer:
         )
         compute_metrics([item], ["aesthetic"], "text2img", [{"item_id": "t1", "prompt": "test"}])
         metrics = item.results["model-a"].metrics
-        # "aesthetic" alias maps to NimaScorer (nima_score) if pyiqa available,
-        # otherwise falls back to AestheticScorer (aesthetic_score)
-        aes = [m for m in metrics if m.metric in ("aesthetic_score", "nima_score")]
-        assert len(aes) == 1
-        assert 0.0 <= aes[0].value <= 1.0
+        nima = [m for m in metrics if m.metric == "nima_score"]
+        assert len(nima) == 1
+        assert 0.0 <= nima[0].value <= 1.0
+
+    def test_compute_metrics_new_scorers(self, tmp_path: Path) -> None:
+        """compute_metrics includes arniqa, clipiqa, musiq when requested."""
+        from evalytic.bench.metrics import NIMA_AVAILABLE
+        if not NIMA_AVAILABLE:
+            pytest.skip("pyiqa not installed")
+        from PIL import Image
+        from evalytic.bench.metrics import compute_metrics
+        from evalytic.bench.types import BenchItem, ImageResult
+
+        img = Image.new("RGB", (256, 256), (100, 150, 200))
+        img_path = str(tmp_path / "test.png")
+        img.save(img_path)
+
+        item = BenchItem(
+            item_id="t1",
+            prompt="test",
+            results={
+                "model-a": ImageResult(
+                    model="model-a",
+                    image_url="http://example.com/img.png",
+                    image_local=img_path,
+                    status="success",
+                ),
+            },
+        )
+        compute_metrics(
+            [item], ["arniqa", "topiq", "musiq"], "text2img",
+            [{"item_id": "t1", "prompt": "test"}],
+        )
+        metrics = item.results["model-a"].metrics
+        metric_names = {m.metric for m in metrics}
+        assert "arniqa_score" in metric_names
+        assert "topiq_score" in metric_names
+        assert "musiq_score" in metric_names
+        for m in metrics:
+            assert 0.0 <= m.value <= 1.0
 
 
 # -----------------------------------------------------------------------
@@ -1257,7 +1329,7 @@ class TestPublicApi:
         import evalytic
 
         assert callable(evalytic.bench)
-        assert evalytic.__version__ == "0.3.11"
+        assert evalytic.__version__ == "0.4.1"
 
 
 # -----------------------------------------------------------------------

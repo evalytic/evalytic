@@ -214,104 +214,7 @@ class FaceScorer:
 
 
 # ---------------------------------------------------------------------------
-# Aesthetic scorer (LAION CLIP-MLP)
-# ---------------------------------------------------------------------------
-
-
-class AestheticScorer:
-    """Aesthetic quality predictor — MLP on CLIP ViT-L/14 embeddings.
-
-    Uses the improved-aesthetic-predictor (SAC+logos+AVA) trained on
-    ``openai/clip-vit-large-patch14`` embeddings.  Normalises the raw
-    1-10 AVA score to 0-1.
-
-    Optionally accepts a :class:`CLIPScorer` to reuse its loaded model
-    instead of loading a second copy.
-
-    Requires ``pip install evalytic[metrics]`` (torch + transformers).
-    """
-
-    _HF_REPO = "camenduru/improved-aesthetic-predictor"
-    _HF_FILE = "sac+logos+ava1-l14-linearMSE.pth"
-
-    def __init__(
-        self,
-        clip_scorer: CLIPScorer | None = None,
-        cache_dir: str | None = None,
-    ) -> None:
-        if not METRICS_AVAILABLE:
-            raise RuntimeError(
-                "Aesthetic scoring requires evalytic[metrics]. "
-                "Install with: pip install evalytic[metrics]"
-            )
-        self._clip_scorer = clip_scorer
-        self._cache_dir = str(Path(cache_dir or _DEFAULT_CACHE_DIR).expanduser())
-        self._model: Any = None
-        self._processor: Any = None
-        self._mlp: Any = None
-
-    def _load(self) -> None:
-        if self._mlp is not None:
-            return
-
-        # Reuse CLIP model from CLIPScorer if available
-        if self._clip_scorer is not None:
-            self._clip_scorer._load()
-            self._model = self._clip_scorer._model
-            self._processor = self._clip_scorer._processor
-        else:
-            self._model = _transformers.CLIPModel.from_pretrained(
-                _DEFAULT_CLIP_MODEL, cache_dir=self._cache_dir,
-            )
-            self._processor = _transformers.CLIPProcessor.from_pretrained(
-                _DEFAULT_CLIP_MODEL, cache_dir=self._cache_dir,
-            )
-            self._model.eval()
-
-        # MLP: 768 → 1024 → 128 → 64 → 16 → 1 (no activations)
-        self._mlp = _torch.nn.Sequential(
-            _torch.nn.Linear(768, 1024),
-            _torch.nn.Dropout(0.2),
-            _torch.nn.Linear(1024, 128),
-            _torch.nn.Dropout(0.2),
-            _torch.nn.Linear(128, 64),
-            _torch.nn.Dropout(0.1),
-            _torch.nn.Linear(64, 16),
-            _torch.nn.Linear(16, 1),
-        )
-
-        # Download weights from HuggingFace
-        from huggingface_hub import hf_hub_download  # available via transformers
-
-        weights_path = hf_hub_download(
-            self._HF_REPO, self._HF_FILE, cache_dir=self._cache_dir,
-        )
-        state_dict = _torch.load(weights_path, map_location="cpu", weights_only=True)
-        # Remap keys: "layers.X.weight" → "X.weight"
-        remapped = {k.replace("layers.", ""): v for k, v in state_dict.items()}
-        self._mlp.load_state_dict(remapped)
-        self._mlp.eval()
-
-    def score(self, image_path: str) -> float:
-        """Return aesthetic score in [0.0, 1.0].  Higher = more aesthetic."""
-        self._load()
-        from PIL import Image
-
-        img = Image.open(image_path).convert("RGB")
-        inputs = self._processor(images=img, return_tensors="pt")
-        with _torch.no_grad():
-            emb = self._model.get_image_features(**inputs)
-            if not isinstance(emb, _torch.Tensor):
-                emb = emb.pooler_output if hasattr(emb, "pooler_output") else emb[1]
-            emb = emb / emb.norm(dim=-1, keepdim=True)
-            raw = self._mlp(emb).item()
-
-        # AVA scores 1-10 → normalise to 0-1
-        return round(max(0.0, min(1.0, (raw - 1.0) / 9.0)), 4)
-
-
-# ---------------------------------------------------------------------------
-# NIMA scorer (pyiqa) — replaces AestheticScorer
+# NIMA scorer (pyiqa)
 # ---------------------------------------------------------------------------
 
 
@@ -385,6 +288,110 @@ class OCRScorer:
             return round(max(0.0, min(1.0, ratio)), 4)
         except Exception:
             return None
+
+
+# ---------------------------------------------------------------------------
+# ARNIQA scorer (pyiqa) — learned quality regression
+# ---------------------------------------------------------------------------
+
+
+class ARNIQAScorer:
+    """ARNIQA — learned image quality regression (KonIQ-10k trained).
+
+    More comprehensive than sharpness alone, captures overall technical quality.
+    Returns normalised 0-1 score.
+
+    Requires ``pip install pyiqa``.
+    """
+
+    def __init__(self) -> None:
+        if not NIMA_AVAILABLE:
+            raise RuntimeError(
+                "ARNIQA scoring requires pyiqa. "
+                "Install with: pip install pyiqa"
+            )
+        self._model: Any = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        self._model = _pyiqa.create_metric("arniqa", device="cpu")
+
+    def score(self, image_path: str) -> float:
+        """Return ARNIQA quality score in [0.0, 1.0]."""
+        self._load()
+        raw = self._model(image_path).item()
+        return round(max(0.0, min(1.0, raw)), 4)
+
+
+# ---------------------------------------------------------------------------
+# TOPIQ scorer (pyiqa) — top-down quality assessment
+# ---------------------------------------------------------------------------
+
+
+class TOPIQScorer:
+    """TOPIQ — Top-down Image Quality assessment.
+
+    State-of-the-art no-reference quality metric using CFANet architecture,
+    trained on KonIQ-10k. Returns normalised 0-1 score.
+
+    Requires ``pip install pyiqa``.
+    """
+
+    def __init__(self) -> None:
+        if not NIMA_AVAILABLE:
+            raise RuntimeError(
+                "TOPIQ scoring requires pyiqa. "
+                "Install with: pip install pyiqa"
+            )
+        self._model: Any = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        self._model = _pyiqa.create_metric("topiq_nr", device="cpu")
+
+    def score(self, image_path: str) -> float:
+        """Return TOPIQ quality score in [0.0, 1.0]."""
+        self._load()
+        raw = self._model(image_path).item()
+        return round(max(0.0, min(1.0, raw)), 4)
+
+
+# ---------------------------------------------------------------------------
+# MUSIQ scorer (pyiqa) — multi-scale quality
+# ---------------------------------------------------------------------------
+
+
+class MUSIQScorer:
+    """MUSIQ — Multi-Scale Image Quality transformer.
+
+    Handles varying image resolutions without resize, producing more accurate
+    quality scores for high-resolution AI-generated images.
+    Returns normalised 0-1 score.
+
+    Requires ``pip install pyiqa``.
+    """
+
+    def __init__(self) -> None:
+        if not NIMA_AVAILABLE:
+            raise RuntimeError(
+                "MUSIQ scoring requires pyiqa. "
+                "Install with: pip install pyiqa"
+            )
+        self._model: Any = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        self._model = _pyiqa.create_metric("musiq", device="cpu")
+
+    def score(self, image_path: str) -> float:
+        """Return MUSIQ quality score in [0.0, 1.0]."""
+        self._load()
+        raw = self._model(image_path).item()
+        # MUSIQ outputs ~0-100, normalise to 0-1
+        return round(max(0.0, min(1.0, raw / 100.0)), 4)
 
 
 def _extract_expected_text(prompt: str) -> str:
@@ -483,8 +490,10 @@ def compute_metrics(
     * ``lpips`` — only for img2img (needs an input image)
     * ``face`` — only for img2img (needs an input image with faces)
     * ``sharpness`` — always available (no torch, uses numpy+PIL)
-    * ``aesthetic`` — (deprecated, alias for ``nima``) LAION aesthetic MLP on CLIP embeddings
-    * ``nima`` — NIMA aesthetic quality predictor (requires pyiqa)
+    * ``nima`` / ``aesthetic`` — NIMA aesthetic quality (requires pyiqa)
+    * ``arniqa`` — learned quality regression (requires pyiqa)
+    * ``topiq`` — TOPIQ top-down quality assessment (requires pyiqa)
+    * ``musiq`` — multi-scale quality transformer (requires pyiqa)
     * ``ocr`` — OCR text accuracy for prompts with quoted text (requires pytesseract)
     """
     from .types import MetricResult
@@ -493,8 +502,10 @@ def compute_metrics(
     lpips_scorer: LPIPSScorer | None = None
     face_scorer: FaceScorer | None = None
     sharpness_scorer: SharpnessScorer | None = None
-    aesthetic_scorer: AestheticScorer | None = None
     nima_scorer: NimaScorer | None = None
+    arniqa_scorer: ARNIQAScorer | None = None
+    topiq_scorer: TOPIQScorer | None = None
+    musiq_scorer: MUSIQScorer | None = None
     ocr_scorer: OCRScorer | None = None
 
     if "clip" in metric_types and pipeline == "text2img":
@@ -505,18 +516,18 @@ def compute_metrics(
         face_scorer = FaceScorer(cache_dir=cache_dir)
     if "sharpness" in metric_types:
         sharpness_scorer = SharpnessScorer()
-    if "aesthetic" in metric_types and "nima" not in metric_types:
-        # "aesthetic" is deprecated alias — use NimaScorer if available, else fall back
-        if NIMA_AVAILABLE:
-            nima_scorer = NimaScorer()
-        else:
-            aesthetic_scorer = AestheticScorer(clip_scorer=clip_scorer, cache_dir=cache_dir)
-    if "nima" in metric_types:
+    if "nima" in metric_types or "aesthetic" in metric_types:
         nima_scorer = NimaScorer()
+    if "arniqa" in metric_types:
+        arniqa_scorer = ARNIQAScorer()
+    if "topiq" in metric_types:
+        topiq_scorer = TOPIQScorer()
+    if "musiq" in metric_types:
+        musiq_scorer = MUSIQScorer()
     if "ocr" in metric_types:
         ocr_scorer = OCRScorer()
 
-    if clip_scorer is None and lpips_scorer is None and face_scorer is None and sharpness_scorer is None and aesthetic_scorer is None and nima_scorer is None and ocr_scorer is None:
+    if clip_scorer is None and lpips_scorer is None and face_scorer is None and sharpness_scorer is None and nima_scorer is None and arniqa_scorer is None and topiq_scorer is None and musiq_scorer is None and ocr_scorer is None:
         return
 
     # Build a prompt lookup: item_id -> prompt text
@@ -608,19 +619,6 @@ def compute_metrics(
                 except Exception:
                     pass  # skip on failure
 
-            if aesthetic_scorer:
-                try:
-                    val = aesthetic_scorer.score(img_result.image_local)
-                    img_result.metrics.append(
-                        MetricResult(
-                            metric="aesthetic_score",
-                            value=val,
-                            description="Aesthetic quality (LAION MLP on CLIP, 0-1)",
-                        )
-                    )
-                except Exception:
-                    pass  # skip on failure
-
             if nima_scorer:
                 try:
                     val = nima_scorer.score(img_result.image_local)
@@ -629,6 +627,45 @@ def compute_metrics(
                             metric="nima_score",
                             value=val,
                             description="NIMA aesthetic quality (AVA-trained, 0-1)",
+                        )
+                    )
+                except Exception:
+                    pass  # skip on failure
+
+            if arniqa_scorer:
+                try:
+                    val = arniqa_scorer.score(img_result.image_local)
+                    img_result.metrics.append(
+                        MetricResult(
+                            metric="arniqa_score",
+                            value=val,
+                            description="ARNIQA learned quality (KonIQ-10k, 0-1)",
+                        )
+                    )
+                except Exception:
+                    pass  # skip on failure
+
+            if topiq_scorer:
+                try:
+                    val = topiq_scorer.score(img_result.image_local)
+                    img_result.metrics.append(
+                        MetricResult(
+                            metric="topiq_score",
+                            value=val,
+                            description="TOPIQ quality (CFANet, KonIQ-10k, 0-1)",
+                        )
+                    )
+                except Exception:
+                    pass  # skip on failure
+
+            if musiq_scorer:
+                try:
+                    val = musiq_scorer.score(img_result.image_local)
+                    img_result.metrics.append(
+                        MetricResult(
+                            metric="musiq_score",
+                            value=val,
+                            description="MUSIQ multi-scale quality (0-1)",
                         )
                     )
                 except Exception:

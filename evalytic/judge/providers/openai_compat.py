@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from ..common import parse_response
+from ..common import extract_response_cost, parse_response
 from .base import BaseProvider
 
 
@@ -31,7 +31,9 @@ class OpenAICompatProvider(BaseProvider):
         user_prompt: str,
         system_prompt: str,
         images: list[tuple[str, str]] | None = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self.last_cost = 0.0
         content: list[dict[str, Any]] = []
         if images:
             for b64, mime in images:
@@ -50,6 +52,11 @@ class OpenAICompatProvider(BaseProvider):
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
         }
+        if response_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": response_schema,
+            }
         url = f"{self.base_url}/chat/completions"
 
         headers: dict[str, str] = {}
@@ -61,6 +68,7 @@ class OpenAICompatProvider(BaseProvider):
 
         resp = self._client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
+        self.last_cost = extract_response_cost(resp)
         text = resp.json()["choices"][0]["message"]["content"]
         return parse_response(text)
 

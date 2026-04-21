@@ -84,6 +84,9 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     # OpenAI
     "gpt-image-1": ModelEntry("gpt-image-1", "fal-ai/gpt-image-1/text-to-image", "text2img", 0.042),
     "gpt-image-1-mini": ModelEntry("gpt-image-1-mini", "fal-ai/gpt-image-1-mini", "text2img", 0.011),
+    "gpt-image-1.5": ModelEntry("gpt-image-1.5", "fal-ai/gpt-image-1.5", "text2img", 0.034),
+    # Luma
+    "luma-photon": ModelEntry("luma-photon", "fal-ai/luma-photon", "text2img", 0.019),
     # Other
     "z-image-turbo": ModelEntry("z-image-turbo", "fal-ai/z-image/turbo", "text2img", 0.005),
     "glm-image": ModelEntry("glm-image", "fal-ai/glm-image", "text2img", 0.05),

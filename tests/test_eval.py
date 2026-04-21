@@ -31,7 +31,7 @@ from evalytic.dataset import Dataset
 
 
 def test_version_is_set() -> None:
-    assert evalytic.__version__ == "0.3.11"
+    assert evalytic.__version__ == "0.4.1"
 
 
 # -----------------------------------------------------------------------
@@ -235,9 +235,15 @@ def test_public_api_exports() -> None:
     assert callable(evalytic.eval_image)
     assert callable(evalytic.compare)
     assert callable(evalytic.init_dataset)
+    assert callable(evalytic.evaluate_rag)
+    assert callable(evalytic.evaluate_text)
+    assert callable(evalytic.evaluate_agent)
     assert evalytic.Eval is not None
     assert evalytic.Dataset is not None
     assert evalytic.DimensionScore is not None
     assert evalytic.EvalResult is not None
     assert evalytic.ExperimentResult is not None
     assert evalytic.CompareReport is not None
+    assert evalytic.RAGTestCase is not None
+    assert evalytic.TextTestCase is not None
+    assert evalytic.AgentTestCase is not None

@@ -41,7 +41,7 @@ class LeaderboardEntry:
     family: str
     fal_endpoint: str
     cost_per_image: float
-    seed_label: str  # "42" or "median of 3"
+    seed_label: str  # "42" or "—" (no seed support)
     imgsys_elo: int | None
     license_type: str  # "open" or "proprietary"
     avg_time_s: float
@@ -53,6 +53,9 @@ class LeaderboardEntry:
     clip_score: float
     sharpness: float
     nima_score: float | None  # None if not available
+    arniqa_score: float | None = None
+    topiq_score: float | None = None
+    musiq_score: float | None = None
     ocr_accuracy: float | None = None  # None if not available or no text prompts
 
 
@@ -76,6 +79,13 @@ class LeaderboardData:
     proprietary_count: int = 0
     config: dict[str, Any] = field(default_factory=dict)  # bench config (seed, image_size, etc.)
     display_names: dict[str, str] = field(default_factory=dict)  # model_key -> display name
+    best_value: str = ""  # model_key with highest score/$
+    best_value_display: str = ""  # display name
+    best_value_cost: float = 0.0  # $/img
+    judge_agree_pct: float = 0.0  # % of dimensions where judges agree within 0.5
+    judge_avg_gap: float = 0.0  # avg gap between highest and lowest judge
+    judge_extreme_pct: float = 0.0  # % with gap > 1.0
+    cdn_base: str = ""  # CDN base URL for images (e.g. https://evalytic.ai/leaderboard)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +152,34 @@ def _categorize_prompt(item_id: str, prompt: str, tags: list[str] | None = None)
 # ---------------------------------------------------------------------------
 
 
+def _calc_judge_agreement(report: BenchReport) -> dict[str, float]:
+    """Calculate inter-judge agreement statistics from a BenchReport."""
+    gaps: list[float] = []
+    agree = extreme = 0
+    for item in report.items:
+        for _model, result in item.results.items():
+            if result.status != "success":
+                continue
+            for dr in result.scores:
+                if not dr.judge_scores or len(dr.judge_scores) < 2:
+                    continue
+                vals = list(dr.judge_scores.values())
+                gap = max(vals) - min(vals)
+                gaps.append(gap)
+                if gap <= 0.5:
+                    agree += 1
+                if gap > 1.0:
+                    extreme += 1
+    total = len(gaps)
+    if total == 0:
+        return {"judge_agree_pct": 0, "judge_avg_gap": 0, "judge_extreme_pct": 0}
+    return {
+        "judge_agree_pct": round(agree / total * 100, 1),
+        "judge_avg_gap": round(sum(gaps) / total, 2),
+        "judge_extreme_pct": round(extreme / total * 100, 1),
+    }
+
+
 def enrich_report(
     report: BenchReport,
     *,
@@ -186,7 +224,7 @@ def enrich_report(
             family=family,
             fal_endpoint=fal_endpoint,
             cost_per_image=cost,
-            seed_label=str(report.config.get("seed", 42)) if seed_supported else "median of 3",
+            seed_label=str(report.config.get("seed", 42)) if seed_supported else "\u2014",
             imgsys_elo=imgsys_elo,
             license_type=license_type,
             avg_time_s=round(avg_time_s, 1),
@@ -196,17 +234,28 @@ def enrich_report(
             clip_score=ms.metric_averages.get("clip_score", 0.0),
             sharpness=ms.metric_averages.get("sharpness", 0.0),
             nima_score=ms.metric_averages.get("nima_score"),
+            arniqa_score=ms.metric_averages.get("arniqa_score"),
+            topiq_score=ms.metric_averages.get("topiq_score"),
+            musiq_score=ms.metric_averages.get("musiq_score"),
             ocr_accuracy=ms.metric_averages.get("ocr_accuracy"),
         ))
 
-    seed_count = sum(1 for e in entries if e.seed_label != "median of 3")
+    seed_count = sum(1 for e in entries if e.seed_label not in ("\u2014", "median of 3"))
     noseed_count = len(entries) - seed_count
     open_count = sum(1 for e in entries if e.license_type == "open")
     proprietary_count = len(entries) - open_count
 
     # Judge string
     if report.consensus_mode and report.judges:
-        judge_str = f"Consensus ({', '.join(report.judges)})"
+        # Pretty-print judge names for display
+        _JUDGE_DISPLAY = {
+            "fal/claude-sonnet-4-6": "Claude Sonnet 4.6",
+            "bedrock/eu.anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
+            "fal/gpt-5.2": "GPT-5.2",
+            "gemini-2.5-flash": "Gemini 2.5 Flash",
+        }
+        pretty = [_JUDGE_DISPLAY.get(j, j) for j in report.judges]
+        judge_str = f"3-Judge Median ({', '.join(pretty)})"
     elif report.judge:
         judge_str = report.judge
     else:
@@ -255,6 +304,10 @@ def enrich_report(
         proprietary_count=proprietary_count,
         config=report.config if report.config else {},
         display_names=display_names,
+        best_value=report.best_value,
+        best_value_display=display_names.get(report.best_value, report.best_value),
+        best_value_cost=report.summary[report.best_value].cost_per_image if report.best_value and report.best_value in report.summary else 0.0,
+        **_calc_judge_agreement(report),
     )
 
 
@@ -262,10 +315,10 @@ def enrich_report(
 # Default overall calculation (server-side, 80/20 weights)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_VLM_WEIGHT = 0.80
-_DEFAULT_DET_WEIGHT = 0.20
+_DEFAULT_VLM_WEIGHT = 0.60
+_DEFAULT_DET_WEIGHT = 0.40
 _DEFAULT_VLM_SUB = {"visual_quality": 0.40, "prompt_adherence": 0.40, "text_rendering": 0.20}
-_DEFAULT_DET_SUB = {"clip_score": 0.40, "sharpness": 0.30, "nima_score": 0.30}
+_DEFAULT_DET_SUB = {"clip_score": 0.25, "sharpness": 0.15, "nima_score": 0.25, "arniqa_score": 0.00, "topiq_score": 0.35, "musiq_score": 0.00}
 
 # CLIP normalize range (raw 0.15-0.40 -> 0-1)
 _CLIP_RANGE = (0.15, 0.40)
@@ -320,6 +373,21 @@ def _calc_overall(e: LeaderboardEntry) -> float:
         det_vals.append(min(1.0, e.nima_score))
         det_ws.append(_DEFAULT_DET_SUB["nima_score"])
 
+    # ARNIQA -- raw
+    if e.arniqa_score is not None and e.arniqa_score > 0:
+        det_vals.append(min(1.0, e.arniqa_score))
+        det_ws.append(_DEFAULT_DET_SUB["arniqa_score"])
+
+    # TOPIQ -- raw
+    if e.topiq_score is not None and e.topiq_score > 0:
+        det_vals.append(min(1.0, e.topiq_score))
+        det_ws.append(_DEFAULT_DET_SUB["topiq_score"])
+
+    # MUSIQ -- raw
+    if e.musiq_score is not None and e.musiq_score > 0:
+        det_vals.append(min(1.0, e.musiq_score))
+        det_ws.append(_DEFAULT_DET_SUB["musiq_score"])
+
     if det_vals:
         dw_sum = sum(det_ws)
         det_unit = sum(v * w / dw_sum for v, w in zip(det_vals, det_ws))
@@ -348,37 +416,54 @@ LEADERBOARD_TEMPLATE = Template("""\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ data.title }} — Best AI Image Generators Ranked ({{ data.date[:7] }})</title>
-<meta name="description" content="Independent benchmark of {{ data.model_count }} AI image generation models including Flux, Imagen, Seedream, GPT Image, and more. Ranked by VLM judges ({{ data.judge }}) + CLIP Score + NIMA quality. Updated {{ data.date }}.">
-<meta name="keywords" content="AI image generation, image model benchmark, text to image comparison, Flux vs Imagen, AI image quality, CLIP score, NIMA score, image generation leaderboard, best AI image generator 2026, Evalytic">
+<meta name="description" content="Independent benchmark of {{ data.model_count }} AI image generation models including Flux, Imagen, Seedream, GPT Image, and more. Ranked by {{ data.judge }} + CLIP Score + NIMA + TOPIQ. Updated {{ data.date }}.">
+<meta name="keywords" content="AI image generation, image model benchmark, text to image comparison, Flux vs Imagen vs Seedream vs GPT Image, AI image quality, CLIP score, NIMA score, TOPIQ, image generation leaderboard, best AI image generator 2026, Evalytic, fal.ai benchmark">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://evalytic.ai/leaderboard">
 <meta property="og:title" content="{{ data.title }} — Best AI Image Generators Ranked">
-<meta property="og:description" content="Independent benchmark of {{ data.model_count }} AI image models. Flux, Imagen, Seedream, GPT Image and more ranked by VLM judges + deterministic metrics.">
+<meta property="og:description" content="Independent benchmark of {{ data.model_count }} AI image models. Flux, Imagen, Seedream, GPT Image and more ranked by 3-judge median + 5 deterministic metrics.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://evalytic.ai/leaderboard">
 <meta property="og:site_name" content="Evalytic">
+<meta property="og:image" content="https://evalytic.ai/og-leaderboard.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{ data.title }}">
-<meta name="twitter:description" content="{{ data.model_count }} AI image models benchmarked with VLM judges + CLIP + NIMA scores.">
+<meta name="twitter:description" content="{{ data.model_count }} AI image models benchmarked with 3-judge median + CLIP + NIMA + TOPIQ.">
+<meta name="twitter:image" content="https://evalytic.ai/og-leaderboard.png">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "WebPage",
   "name": "{{ data.title }}",
-  "description": "Independent benchmark of {{ data.model_count }} AI image generation models ranked by visual quality, prompt adherence, and text rendering.",
+  "description": "Independent benchmark of {{ data.model_count }} AI image generation models ranked by visual quality, prompt adherence, and text rendering using 3-judge median and 5 deterministic metrics.",
   "url": "https://evalytic.ai/leaderboard",
   "dateModified": "{{ data.date }}",
   "publisher": {
     "@type": "Organization",
     "name": "Evalytic",
-    "url": "https://evalytic.ai"
+    "url": "https://evalytic.ai",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "https://evalytic.ai/og-image.png"
+    }
+  },
+  "image": "https://evalytic.ai/og-leaderboard.png",
+  "breadcrumb": {
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {"@type": "ListItem", "position": 1, "name": "Evalytic", "item": "https://evalytic.ai"},
+      {"@type": "ListItem", "position": 2, "name": "Leaderboard", "item": "https://evalytic.ai/leaderboard"}
+    ]
   },
   "mainEntity": {
     "@type": "Dataset",
     "name": "Evalytic Image Models Benchmark",
-    "description": "{{ data.model_count }} text-to-image AI models evaluated across {{ data.prompt_count }} prompts using consensus VLM judges and deterministic metrics (CLIP, sharpness, NIMA score).",
+    "description": "{{ data.model_count }} text-to-image AI models evaluated across {{ data.prompt_count }} prompts using consensus VLM judges and deterministic metrics.",
     "license": "https://opensource.org/licenses/MIT",
-    "variableMeasured": ["Visual Quality", "Prompt Adherence", "Text Rendering", "CLIP Score", "Sharpness", "NIMA Score"]
+    "dateModified": "{{ data.date }}",
+    "variableMeasured": ["Visual Quality", "Prompt Adherence", "Text Rendering", "CLIP Score", "Sharpness", "NIMA Score", "TOPIQ"]
   }
 }
 </script>
@@ -486,6 +571,11 @@ button:hover { border-color: var(--accent); }
 .col-tooltip.visible { opacity: 1; }
 
 /* Table */
+.try-link { display: inline-block; color: var(--blue); font-size: 0.72rem; font-weight: 500;
+  text-decoration: none; opacity: 0.8; padding: 0.15rem 0.4rem; border-radius: 4px;
+  border: 1px solid rgba(59,130,246,0.2); background: rgba(59,130,246,0.05); }
+.try-link:hover { opacity: 1; background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); text-decoration: none; }
+td[data-col="fal"] { text-align: center; }
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; font-size: 0.8rem; white-space: nowrap; }
 caption { text-align: left; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.3rem; }
@@ -503,7 +593,8 @@ tbody tr:hover { background: rgba(74,222,128,0.04); }
 td { font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', 'Inter', monospace; font-size: 0.78rem; }
 td[data-col="name"] { font-family: 'Inter', system-ui, sans-serif; }
 td[data-col="family"] { font-family: 'Inter', system-ui, sans-serif; }
-td[data-col="seed"] { font-family: 'Inter', system-ui, sans-serif; font-size: 0.75rem; }
+td[data-col="seed"] { font-family: 'Inter', system-ui, sans-serif; font-size: 0.75rem; min-width: 2.5rem; text-align: center; }
+td[data-col="spd"], th[data-sort="spd"] { padding-left: 0.2rem; padding-right: 0.2rem; font-size: 0.7rem; }
 
 /* Rank medals — top 3 rows */
 tr[data-rank="1"] { background: rgba(234,179,8,0.06); }
@@ -551,12 +642,13 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   vertical-align: middle; font-style: normal; letter-spacing: 0.02em; }
 .pb-prompt-text { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;
   font-style: italic; line-height: 1.4; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
-.pb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 0.75rem; margin-top: 0.75rem; }
+.pb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.5rem; margin-top: 0.75rem; }
 .pb-card { text-align: center; }
-.pb-card img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px;
-  border: 1px solid var(--border); transition: transform 0.15s, border-color 0.15s; cursor: pointer; }
-.pb-card img:hover { transform: scale(1.03); border-color: var(--accent-dark); }
+.pb-card img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px;
+  border: 1px solid var(--border); transition: transform 0.15s, border-color 0.15s; cursor: pointer;
+  image-rendering: auto; }
+.pb-card img:hover { transform: scale(1.05); border-color: var(--accent-dark); }
 .pb-label { display: block; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.25rem;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pb-slide { display: none; }
@@ -565,7 +657,15 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
 .pb-lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 1000;
   display: none; align-items: center; justify-content: center; cursor: pointer; }
 .pb-lightbox.open { display: flex; }
-.pb-lightbox img { max-width: 85vw; max-height: 80vh; border-radius: 8px; cursor: default; }
+.pb-lightbox img { max-width: 85vw; max-height: 80vh; border-radius: 8px; cursor: default;
+  transition: opacity 0.15s; }
+.pb-lightbox img.loading { opacity: 0.15; }
+.pb-lightbox .lb-spinner { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  width: 2.5rem; height: 2.5rem; border: 3px solid rgba(255,255,255,0.2);
+  border-top-color: #fff; border-radius: 50%; animation: lb-spin 0.6s linear infinite;
+  display: none; }
+.pb-lightbox .lb-spinner.active { display: block; }
+@keyframes lb-spin { to { transform: translate(-50%,-50%) rotate(360deg); } }
 .pb-lightbox-info { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
   text-align: center; pointer-events: none; }
 .pb-lb-model { color: #fff; font-size: 1.25rem; font-weight: 700;
@@ -614,12 +714,12 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
 .jump-links a:hover { color: var(--text); background: var(--surface); }
 
 /* Disclaimer banner */
-.disclaimer-banner { background: rgba(234,179,8,0.08); border: 1px solid rgba(234,179,8,0.25);
+.disclaimer-banner { background: rgba(34,197,94,0.06); border: 1px solid rgba(34,197,94,0.25);
   border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 1rem; text-align: center;
   font-size: 0.78rem; color: var(--text-muted); line-height: 1.5; }
-.disclaimer-banner strong { color: var(--yellow); }
-.light .disclaimer-banner { background: rgba(161,98,7,0.06); border-color: rgba(161,98,7,0.2); }
-.light .disclaimer-banner strong { color: #92400e; }
+.disclaimer-banner strong { color: var(--accent); }
+.light .disclaimer-banner { background: rgba(22,163,74,0.06); border-color: rgba(22,163,74,0.2); }
+.light .disclaimer-banner strong { color: #15803d; }
 
 /* Footer */
 .footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
@@ -654,7 +754,9 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   .disclaimer-banner { font-size: 0.72rem; padding: 0.5rem 0.75rem; margin: 0.5rem; }
 
   /* Table: hide # col, sticky model name col */
-  .table-wrap { margin: 0; border-radius: 0; }
+  .table-wrap { margin: 0; border-radius: 0; position: relative; }
+  .table-wrap::after { content: "\2190 scroll \2192"; display: block; text-align: center;
+    font-size: 0.65rem; color: var(--text-muted); opacity: 0.6; padding: 0.3rem 0; }
   table { font-size: 0.7rem; }
   th, td { padding: 0.3rem 0.4rem; }
   /* Hide rank (#) and family columns on mobile */
@@ -747,17 +849,9 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   </div>
 </header>
 
-<!-- Disclaimer Banner -->
-<div class="disclaimer-banner">
-  <strong>Pilot Preview</strong> &mdash; This leaderboard is based on {{ data.prompt_count }} prompts only.
-  The full benchmark (100 curated prompts) is in progress and will replace this preview.
-  Scores may shift significantly with more data.
-</div>
-
 <div class="header">
   <h1>{{ data.title }}</h1>
   <div class="header-right">
-    <span class="powered-by">Powered by <span>Evalytic</span></span>
     {% if data.archive_versions %}
     <select id="archive-select" aria-label="Select leaderboard version">
       {% for v in data.archive_versions %}
@@ -769,8 +863,8 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   </div>
 </div>
 <div class="subtitle">
-  Run on fal.ai &middot; {{ data.date }} &middot; {{ data.model_count }} models &middot; {{ data.prompt_count }} prompts
-  &middot; Judge: {{ data.judge or "&mdash;" }}
+  Last run: {{ data.date }} &middot; {{ data.model_count }} models &middot; {{ data.prompt_count }} prompts &middot; {{ data.judge or "&mdash;" }}
+  &middot; Built with <a href="https://github.com/evalytic/evalytic" style="color:var(--accent)">Evalytic</a>
   <span class="jump-links">
     <a href="#rankings-table">#Rankings</a>
     <a href="#prompt-browser">#Images</a>
@@ -781,6 +875,10 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
 <!-- Weight panel toggle -->
 <div class="controls">
   <button id="weight-toggle">Customize Weights &#9662;</button>
+  <span style="color:var(--text-muted);font-size:0.75rem">|</span>
+  <button id="share-btn" title="Copy shareable link">&#128279; Copy Link</button>
+  <button id="share-x-btn" title="Share on X/Twitter" style="font-size:0.75rem;padding:0.4rem 0.6rem">&#120143; Post</button>
+  <button id="share-li-btn" title="Share on LinkedIn" style="font-size:0.75rem;padding:0.4rem 0.6rem">in Share</button>
   <span style="color:var(--text-muted);font-size:0.75rem">|</span>
   <div style="position:relative;display:inline-block">
     <button id="filter-toggle" style="cursor:pointer">Filters <span id="filter-badge" style="display:none;background:var(--accent);color:#000;font-size:0.6rem;padding:0.05rem 0.35rem;border-radius:99px;margin-left:0.2rem;font-weight:700"></span> &#9662;</button>
@@ -822,6 +920,8 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     <button class="preset-btn" data-preset="text">Text-Heavy</button>
     <button class="preset-btn" data-preset="ecommerce">E-Commerce</button>
     <button class="preset-btn" data-preset="speed">Speed</button>
+    <button class="preset-btn" data-preset="budget">Budget</button>
+    <button class="preset-btn" data-preset="photorealistic">Photorealistic</button>
   </div>
   <div class="weight-group">
     <div style="display:flex;align-items:center;gap:0.5rem">
@@ -830,8 +930,8 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     </div>
     <div class="weight-row">
       <label for="w-vlm">VLM Total</label>
-      <input type="range" id="w-vlm" min="0" max="100" value="80">
-      <output for="w-vlm">80%</output>
+      <input type="range" id="w-vlm" min="0" max="100" value="60">
+      <output for="w-vlm">60%</output>
     </div>
     <div class="weight-row" style="padding-left:1rem">
       <label for="w-vq">Visual Quality</label>
@@ -856,24 +956,32 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     </div>
     <div class="weight-row">
       <label for="w-det">Deterministic Total</label>
-      <input type="range" id="w-det" min="0" max="100" value="20">
-      <output for="w-det">20%</output>
+      <input type="range" id="w-det" min="0" max="100" value="40">
+      <output for="w-det">40%</output>
     </div>
     <div class="weight-row" style="padding-left:1rem">
       <label for="w-clip">CLIP Score</label>
-      <input type="range" id="w-clip" min="0" max="100" value="40">
-      <output for="w-clip">40%</output>
+      <input type="range" id="w-clip" min="0" max="100" value="25">
+      <output for="w-clip">25%</output>
     </div>
     <div class="weight-row" style="padding-left:1rem">
       <label for="w-sharp">Sharpness</label>
-      <input type="range" id="w-sharp" min="0" max="100" value="30">
-      <output for="w-sharp">30%</output>
+      <input type="range" id="w-sharp" min="0" max="100" value="15">
+      <output for="w-sharp">15%</output>
     </div>
     <div class="weight-row" style="padding-left:1rem">
       <label for="w-nima">NIMA</label>
-      <input type="range" id="w-nima" min="0" max="100" value="30">
-      <output for="w-nima">30%</output>
+      <input type="range" id="w-nima" min="0" max="100" value="25">
+      <output for="w-nima">25%</output>
     </div>
+    <div class="weight-row" style="padding-left:1rem">
+      <label for="w-topiq">TOPIQ</label>
+      <input type="range" id="w-topiq" min="0" max="100" value="35">
+      <output for="w-topiq">35%</output>
+    </div>
+    <!-- ARNIQA removed (r=0.93 with TOPIQ), MUSIQ removed (CPU-slow, r=0.90 with TOPIQ) -->
+    <input type="hidden" id="w-arniqa" value="0">
+    <input type="hidden" id="w-musiq" value="0">
     <div class="weight-row" style="padding-left:1rem">
       <label for="w-time">Speed <span class="info-icon" title="Faster generation = higher score. Normalized: fastest model = 1.0, slowest = 0.0">&#9432;</span></label>
       <input type="range" id="w-time" min="0" max="100" value="0">
@@ -882,7 +990,6 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   </div>
   <div class="weight-actions">
     <button class="apply-btn" id="apply-btn">&#9654; Apply Weights</button>
-    <button id="share-btn">&#128279; Share</button>
     <button id="reset-btn">&#8634; Reset</button>
   </div>
 </div>
@@ -897,7 +1004,8 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
 </div>
 
 <!-- Leaderboard Table -->
-<div class="table-wrap" id="rankings-table">
+<main>
+<section aria-label="Rankings" class="table-wrap" id="rankings-table">
 <table id="lb-table">
   <caption>Image model leaderboard ranked by overall score</caption>
   <thead>
@@ -913,22 +1021,25 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
       <th data-sort="clip" aria-sort="none" data-tip="CLIP Score (0-1) — Deterministic text-image similarity via OpenAI CLIP ViT-L/14. Higher = better prompt match.">CLIP</th>
       <th data-sort="sharp" aria-sort="none" data-tip="Sharpness (0-1) — Laplacian variance measure. Higher = sharper, more detailed image.">Sharp</th>
       <th data-sort="nima" aria-sort="none" data-tip="NIMA Score (0-1) — Neural Image Assessment trained on human aesthetic ratings (AVA dataset). Higher = more aesthetically pleasing.">NIMA</th>
-      <th data-sort="spd" aria-sort="none" data-tip="Score per Dollar — Overall score / cost per image. Higher = better value for money.">Score/$</th>
+      <th data-sort="arniqa" aria-sort="none" data-tip="ARNIQA (0-1) — Learned quality regression trained on KonIQ-10k." style="display:none">ARNIQA</th>
+      <th data-sort="topiq" aria-sort="none" data-tip="TOPIQ (0-1) — Top-down quality via CFANet (KonIQ-10k trained). State-of-the-art no-reference quality metric.">TOPIQ</th>
+      <th data-sort="musiq" aria-sort="none" data-tip="MUSIQ (0-1) — Multi-Scale Image Quality transformer." style="display:none">MUSIQ</th>
+      <th data-sort="spd" aria-sort="none" data-tip="Score per Dollar — Overall score / cost per image. Higher = better value for money.">S/$</th>
       <th data-sort="elo" aria-sort="none" data-tip="imgsys.org ELO rating — Community-voted ranking for independent reference.">imgsys</th>
       <th data-sort="time" aria-sort="none" data-tip="Average generation time per image (seconds)">Time</th>
-      <th data-sort="seed" aria-sort="none" data-tip="Fixed random seed for reproducibility. 'median of 3' = model doesn't support seed, run 3x and take median.">Seed</th>
-      {% if data.show_fal_links %}<th data-tip="Link to try this model on fal.ai">fal.ai</th>{% endif %}
+      <th data-sort="seed" aria-sort="none" data-tip="Fixed random seed for reproducibility. '&mdash;' = model doesn't support seed.">Seed</th>
+      {% if data.show_fal_links %}<th data-tip="Try this model on fal.ai">Try</th>{% endif %}
     </tr>
   </thead>
   <tbody>
     {% for e in entries_with_overall %}
     <tr data-rank="{{ loop.index }}"
         data-family="{{ e.entry.family }}"
-        data-seed="{{ 'noseed' if e.entry.seed_label == 'median of 3' else 'seed' }}"
+        data-seed="{{ 'noseed' if e.entry.seed_label in ('\u2014', 'median of 3') else 'seed' }}"
         data-license="{{ e.entry.license_type }}"
         data-key="{{ e.entry.model_key }}">
       <td data-col="rank" data-value="{{ loop.index }}">{% if loop.index == 1 %}<span class="rank-medal">&#x1F947;</span>{% elif loop.index == 2 %}<span class="rank-medal">&#x1F948;</span>{% elif loop.index == 3 %}<span class="rank-medal">&#x1F949;</span>{% else %}{{ loop.index }}{% endif %}</td>
-      <td data-col="name" data-value="{{ e.entry.display_name }}" title="{{ e.entry.model_key }}"><strong>{{ e.entry.display_name }}</strong>{% if e.entry.license_type == "open" %} <span class="license-badge open">Open</span>{% endif %}</td>
+      <td data-col="name" data-value="{{ e.entry.display_name }}" title="{{ e.entry.model_key }}"><strong>{{ e.entry.display_name }}</strong>{% if e.entry.license_type == "open" %} <span class="license-badge open">Open</span>{% endif %}{% if e.entry.model_key == data.best_value %} <span class="license-badge" style="background:rgba(251,191,36,0.15);color:var(--gold);border:1px solid rgba(251,191,36,0.3);">Best Value</span>{% endif %}</td>
       <td data-col="family" data-value="{{ e.entry.family }}">{{ e.entry.family }}</td>
       <td data-col="cost" data-value="{{ e.entry.cost_per_image }}">${{ "%.3f" | format(e.entry.cost_per_image) }}</td>
       <td data-col="overall" data-value="{{ e.overall }}"><strong>{{ "%.3f" | format(e.overall) }}</strong></td>
@@ -946,6 +1057,21 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
       {% else %}
       <td data-col="nima" data-value="" class="sc-null" aria-label="Not available">&mdash;</td>
       {% endif %}
+      {% if e.entry.arniqa_score is not none %}
+      <td data-col="arniqa" data-value="{{ e.entry.arniqa_score }}" style="display:none">{{ "%.3f" | format(e.entry.arniqa_score) }}</td>
+      {% else %}
+      <td data-col="arniqa" data-value="" style="display:none">&mdash;</td>
+      {% endif %}
+      {% if e.entry.topiq_score is not none %}
+      <td data-col="topiq" data-value="{{ e.entry.topiq_score }}" class="{{ _score_class_det(e.entry.topiq_score) }}">{{ "%.3f" | format(e.entry.topiq_score) }}</td>
+      {% else %}
+      <td data-col="topiq" data-value="" class="sc-null" aria-label="Not available">&mdash;</td>
+      {% endif %}
+      {% if e.entry.musiq_score is not none %}
+      <td data-col="musiq" data-value="{{ e.entry.musiq_score }}" style="display:none">{{ "%.3f" | format(e.entry.musiq_score) }}</td>
+      {% else %}
+      <td data-col="musiq" data-value="" style="display:none">&mdash;</td>
+      {% endif %}
       <td data-col="spd" data-value="{{ e.spd }}">{{ "%.0f" | format(e.spd) }}</td>
       {% if e.entry.imgsys_elo is not none %}
       <td data-col="elo" data-value="{{ e.entry.imgsys_elo }}">{{ e.entry.imgsys_elo }}</td>
@@ -954,17 +1080,18 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
       {% endif %}
       <td data-col="time" data-value="{{ e.entry.avg_time_s }}">{{ "%.1f" | format(e.entry.avg_time_s) }}s</td>
       <td data-col="seed" data-value="{{ e.entry.seed_label }}">{{ e.entry.seed_label }}</td>
-      {% if data.show_fal_links %}
-      <td><a href="https://fal.ai/models/{{ e.entry.fal_endpoint }}" target="_blank" rel="noopener">Try &rarr;</a></td>
-      {% endif %}
+      {% if data.show_fal_links %}<td data-col="fal"><a href="https://fal.ai/models/{{ e.entry.fal_endpoint }}" target="_blank" rel="noopener" class="try-link" title="Try on fal.ai">Try</a></td>{% endif %}
     </tr>
     {% endfor %}
   </tbody>
 </table>
 </div>
 
+</section>
+
 <!-- Prompt Browser -->
 {% if data.prompts %}
+<section aria-label="Prompt Browser">
 <details class="prompt-browser" id="prompt-browser">
   <summary>Prompt Browser ({{ data.prompt_count }} prompts &times; {{ data.model_count }} models)</summary>
   <div class="pb-nav">
@@ -989,11 +1116,14 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     <div class="pb-prompt-text"><span class="pb-cat-tag">{{ p.category }}</span> &ldquo;{{ p.prompt }}&rdquo;</div>
     <div class="pb-grid">
       {% for model_key, img_url in p.images.items() %}
+      {% set thumb_url = data.cdn_base ~ '/thumbs/' ~ model_key ~ '/' ~ p.item_id ~ '.webp' if data.cdn_base else img_url %}
+      {% set full_url = data.cdn_base ~ '/images/' ~ model_key ~ '/' ~ p.item_id ~ '.webp' if data.cdn_base else img_url %}
       <div class="pb-card">
-        <img {{ 'src' if is_first_slide else 'data-src' }}="{{ img_url }}"
+        <img {{ 'src' if is_first_slide else 'data-src' }}="{{ thumb_url }}"
              alt="{{ data.display_names.get(model_key, model_key) }} — {{ p.prompt[:50] }}"
+             loading="lazy" width="120" height="120"
              onerror="this.parentElement.style.display='none'"
-             data-full="{{ img_url }}" data-model="{{ data.display_names.get(model_key, model_key) }}">
+             data-full="{{ full_url }}" data-model="{{ data.display_names.get(model_key, model_key) }}">
         <span class="pb-label">{{ data.display_names.get(model_key, model_key) }}</span>
       </div>
       {% endfor %}
@@ -1002,6 +1132,7 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   {% endfor %}
 </details>
 <div class="pb-lightbox" id="pb-lightbox">
+  <div class="lb-spinner" id="lb-spinner"></div>
   <img id="pb-lightbox-img" src="" alt="">
   <div class="pb-lightbox-info" id="pb-lightbox-info">
     <div class="pb-lb-model" id="pb-lb-model"></div>
@@ -1010,31 +1141,65 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   <button class="pb-lb-nav pb-lb-prev" id="pb-lb-prev" aria-label="Previous image">&larr;</button>
   <button class="pb-lb-nav pb-lb-next" id="pb-lb-next" aria-label="Next image">&rarr;</button>
 </div>
+</section>
 {% endif %}
 
 <!-- Methodology -->
+<section aria-label="Methodology">
 <details class="methodology" id="methodology">
   <summary>Methodology</summary>
-  <h4 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">Benchmark Setup</h4>
+  <h2 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">Benchmark Setup</h2>
   <ul>
     <li><strong>{{ data.model_count }} models</strong> evaluated on fal.ai infrastructure</li>
     <li><strong>{{ data.prompt_count }} curated prompts</strong> from PartiPrompts, DrawBench, OneIG-Bench + custom. Each prompt contributes equally to final scores (simple average).</li>
-    <li><strong>Judge:</strong> {{ data.judge or "None" }}</li>
-    <li><strong>Seed:</strong> {{ data.seed_count }} models with seed={{ data.config.get('seed', 42) }}{% if data.noseed_count %}, {{ data.noseed_count }} models don't support seed (run 3&times; each, median score taken){% endif %}. A fixed seed ensures the same prompt always produces the same image, making results reproducible and comparisons fair.</li>
+    <li><strong>Judge:</strong> {{ data.judge or "None" }}. Each image is scored by 3 independent VLM judges. Final score = median of 3, mitigating single-judge bias.</li>
+    <li><strong>Seed:</strong> {{ data.seed_count }} models with seed={{ data.config.get('seed', 42) }}{% if data.noseed_count %}, {{ data.noseed_count }} models without seed support (single run &mdash; {{ data.prompt_count }} prompts provides statistical robustness){% endif %}. A fixed seed ensures the same prompt always produces the same image, making results reproducible and comparisons fair.</li>
     {% if data.config.get('image_size') %}<li><strong>Image size:</strong> {{ data.config['image_size'] }}</li>{% endif %}
     <li><strong>Concurrency:</strong> {{ data.config.get('concurrency', 8) }} parallel requests</li>
     <li><strong>Pipeline:</strong> {{ data.config.get('pipeline', 'text2img') }}</li>
     <li><strong>Date:</strong> {{ data.date }}</li>
   </ul>
-  <h4 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">Column Definitions</h4>
+  <h2 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">VLM Judge Evaluation Criteria</h2>
   <ul>
-    <li><strong>Overall</strong> &mdash; Weighted combination of VLM judge scores and deterministic metrics. Formula: <code style="font-size:0.75rem">1 + 4 &times; (vlm_w &times; (vlm_avg&minus;1)/4 + det_w &times; det_avg)</code>. Default: 80% VLM + 20% deterministic. Adjustable via the weight panel above.</li>
+    <li><strong>Visual Quality:</strong> Overall image quality &mdash; sharpness, color fidelity, coherence, realism, absence of artifacts. Scale: 1.0&ndash;5.0 with 0.1 increments.</li>
+    <li><strong>Prompt Adherence:</strong> How faithfully the image matches the prompt &mdash; objects, attributes, spatial relationships, style. Scale: 1.0&ndash;5.0.</li>
+    <li><strong>Text Rendering:</strong> Accuracy of rendered text (signs, labels). Only evaluated on {{ data.prompt_count // 8 }} text-containing prompts. Scale: 1.0&ndash;5.0.</li>
+  </ul>
+  <p style="font-size:0.78rem;color:var(--text-muted);margin:0.3rem 0;">
+    <a href="https://github.com/evalytic/evalytic" target="_blank" rel="noopener">View judge prompt source code &nearr;</a>
+  </p>
+  <h2 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">Inter-Judge Agreement</h2>
+  <ul>
+    <li><strong>{{ data.judge_agree_pct }}%</strong> of dimensions: judges agree within 0.5 points</li>
+    <li>Average judge gap: <strong>{{ data.judge_avg_gap }}</strong> points</li>
+    <li>Extreme disagreement (gap &gt; 1.0): <strong>{{ data.judge_extreme_pct }}%</strong> &mdash; most common in text rendering</li>
+    <li>Median-of-3 approach reduces outlier impact from any single judge</li>
+  </ul>
+  <h2 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">Data &amp; Reproducibility</h2>
+  <ul>
+    <li><a href="https://github.com/evalytic/evalytic" target="_blank" rel="noopener">Prompt dataset (100 prompts, JSON)</a> &mdash; curated from PartiPrompts, DrawBench, OneIG-Bench + custom</li>
+    <li><a href="https://github.com/evalytic/evalytic" target="_blank" rel="noopener">Evalytic SDK (open source)</a> &mdash; the same tool that generated this leaderboard</li>
+    <li>Raw scores embedded in this page (<code style="font-size:0.7rem">View Source &rarr; #leaderboard-data</code>)</li>
+  </ul>
+  <details style="margin:0.5rem 0">
+    <summary style="font-size:0.8rem;cursor:pointer;color:var(--accent)">Reproduce this benchmark</summary>
+    <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.6rem 0.8rem;font-size:0.72rem;margin:0.4rem 0;overflow-x:auto;color:var(--text-muted)"><code>pip install evalytic
+evalytic bench \\
+  --models flux-schnell flux-pro imagen-4 \\
+  --judges "gemini-2.5-flash,gpt-5.2,claude-sonnet-4-6" \\
+  --prompts prompts-text2img-v1.json \\
+  --image-size square_hd --seed 42 --yes</code></pre>
+  </details>
+  <h2 style="font-size:0.82rem;margin:0.8rem 0 0.3rem;color:var(--text)">Column Definitions</h2>
+  <ul>
+    <li><strong>Overall</strong> &mdash; Weighted combination of VLM judge scores and deterministic metrics. Formula: <code style="font-size:0.75rem">1 + 4 &times; (vlm_w &times; (vlm_avg&minus;1)/4 + det_w &times; det_avg)</code>. Default: 60% VLM + 40% deterministic. Adjustable via the weight panel above.</li>
     <li><strong>VQ (Visual Quality)</strong> &mdash; VLM judge score (1&ndash;5). Evaluates overall image quality: sharpness, color fidelity, coherence, realism, and absence of visual artifacts.</li>
     <li><strong>PA (Prompt Adherence)</strong> &mdash; VLM judge score (1&ndash;5). How faithfully the generated image matches the text prompt &mdash; objects, attributes, spatial relationships, and style.</li>
     <li><strong>TR (Text Rendering)</strong> &mdash; VLM judge score (1&ndash;5). Accuracy of text rendered within the image (signs, labels, logos). Only scored on prompts that contain text elements (~12% of prompts). Shows &ldquo;&mdash;&rdquo; for models/prompts without text.</li>
     <li><strong>CLIP</strong> &mdash; Deterministic metric (0&ndash;1). CLIP ViT-L/14 cosine similarity between prompt text and generated image. Higher = better semantic alignment with prompt.</li>
     <li><strong>Sharp (Sharpness)</strong> &mdash; Deterministic metric (0&ndash;1). Variance of Laplacian applied to the image. Higher = sharper, more detailed image. Low values may indicate blur or softness.</li>
     <li><strong>NIMA</strong> &mdash; Deterministic metric (0&ndash;1). Neural Image Assessment (NIMA) trained on human aesthetic ratings (AVA dataset). Higher = more aesthetically pleasing.</li>
+    <li><strong>TOPIQ</strong> &mdash; Deterministic metric (0&ndash;1). Top-down Image Quality via CFANet architecture (KonIQ-10k trained). State-of-the-art no-reference quality metric.</li>
     <li><strong>Score/$</strong> &mdash; Value efficiency: Overall score divided by cost per image. Higher = better quality per dollar spent.</li>
     <li><strong>imgsys</strong> &mdash; ELO rating from <a href="https://imgsys.org" target="_blank">imgsys.org</a> community voting. Independent reference point for cross-validation.</li>
     <li><strong>Time</strong> &mdash; Average image generation time in seconds.</li>
@@ -1042,13 +1207,29 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     <li><strong>$/img</strong> &mdash; Cost per image generation in USD on fal.ai.</li>
   </ul>
 </details>
+</section>
+</main>
 
-<div class="footer">
-  <a href="https://evalytic.ai">evalytic.ai</a> &mdash; Evals for visual AI &mdash;
+<!-- CTA: Run Your Own -->
+<section style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.5rem;margin-top:1.5rem;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+  <h2 style="font-size:1rem;margin:0 0 0.4rem;color:var(--text)">Run this benchmark on your own models</h2>
+  <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 0.8rem;max-width:600px;margin-left:auto;margin-right:auto;">
+    This leaderboard was built with <strong>Evalytic</strong> &mdash; an open-source SDK for evaluating AI-generated images.
+    Same tool works for model selection, regression detection, and CI/CD quality gating.
+  </p>
+  <div style="display:flex;gap:0.6rem;justify-content:center;flex-wrap:wrap;align-items:center;">
+    <code style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.8rem;font-size:0.8rem;font-family:'JetBrains Mono',monospace;color:var(--accent)">pip install evalytic</code>
+    <a href="https://docs.evalytic.ai/quickstart" target="_blank" rel="noopener" style="background:var(--accent);color:#fff;padding:0.4rem 1rem;border-radius:6px;font-size:0.82rem;font-weight:600;text-decoration:none;">Get Started &rarr;</a>
+    <a href="https://github.com/evalytic/evalytic" target="_blank" rel="noopener" style="border:1px solid var(--border);padding:0.4rem 1rem;border-radius:6px;font-size:0.82rem;text-decoration:none;color:var(--text);">GitHub &nearr;</a>
+  </div>
+</section>
+
+<footer class="footer">
+  <a href="https://evalytic.ai">evalytic.ai</a> &mdash; Evals for AI outputs &mdash;
   <a href="https://docs.evalytic.ai/">Docs</a> &middot;
   <a href="https://github.com/evalytic/evalytic">GitHub</a> &middot;
   <a href="https://evalytic.ai/showcase">Showcases</a>
-</div>
+</footer>
 
 <div class="toast" id="toast">Link copied!</div>
 <div class="col-tooltip" id="col-tooltip"></div>
@@ -1071,11 +1252,13 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
 
   // --- Presets ---
   var PRESETS = {
-    "default":   {vlm:80,vq:40,pa:40,tr:20,det:20,clip:40,sharp:30,nima:30,time:0},
-    "quality":   {vlm:90,vq:50,pa:20,tr:30,det:10,clip:20,sharp:40,nima:40,time:0},
-    "text":      {vlm:85,vq:15,pa:25,tr:60,det:15,clip:60,sharp:20,nima:20,time:0},
-    "ecommerce": {vlm:75,vq:40,pa:40,tr:20,det:25,clip:50,sharp:25,nima:25,time:0},
-    "speed":     {vlm:60,vq:34,pa:33,tr:33,det:40,clip:25,sharp:15,nima:15,time:45}
+    "default":       {vlm:60,vq:40,pa:40,tr:20,det:40,clip:25,sharp:15,nima:25,arniqa:0,topiq:35,musiq:0,time:0},
+    "quality":       {vlm:90,vq:50,pa:20,tr:30,det:10,clip:15,sharp:10,nima:30,arniqa:0,topiq:45,musiq:0,time:0},
+    "text":          {vlm:80,vq:30,pa:20,tr:50,det:20,clip:20,sharp:10,nima:30,arniqa:0,topiq:40,musiq:0,time:0},
+    "ecommerce":     {vlm:70,vq:50,pa:40,tr:10,det:30,clip:20,sharp:15,nima:25,arniqa:0,topiq:40,musiq:0,time:0},
+    "speed":         {vlm:60,vq:40,pa:40,tr:20,det:40,clip:15,sharp:10,nima:20,arniqa:0,topiq:25,musiq:0,time:30},
+    "budget":        {vlm:50,vq:35,pa:40,tr:25,det:30,clip:20,sharp:15,nima:25,arniqa:0,topiq:40,musiq:0,time:20},
+    "photorealistic":{vlm:80,vq:60,pa:30,tr:10,det:20,clip:15,sharp:20,nima:25,arniqa:0,topiq:40,musiq:0,time:0}
   };
 
   // --- Slider refs ---
@@ -1088,6 +1271,9 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     clip: document.getElementById("w-clip"),
     sharp: document.getElementById("w-sharp"),
     nima: document.getElementById("w-nima"),
+    arniqa: document.getElementById("w-arniqa"),
+    topiq: document.getElementById("w-topiq"),
+    musiq: document.getElementById("w-musiq"),
     time: document.getElementById("w-time")
   };
 
@@ -1099,7 +1285,7 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
 
   function updateGroupSums() {
     var vlmTotal = (+sliders.vq.value) + (+sliders.pa.value) + (+sliders.tr.value);
-    var detTotal = (+sliders.clip.value) + (+sliders.sharp.value) + (+sliders.nima.value) + (+sliders.time.value);
+    var detTotal = (+sliders.clip.value) + (+sliders.sharp.value) + (+sliders.nima.value) + (+sliders.arniqa.value) + (+sliders.topiq.value) + (+sliders.musiq.value) + (+sliders.time.value);
     vlmSumEl.textContent = "= " + vlmTotal + "%";
     vlmSumEl.className = "group-sum " + (Math.abs(vlmTotal - 100) <= 1 ? "ok" : "err");
     detSumEl.textContent = "= " + detTotal + "%";
@@ -1125,9 +1311,9 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   function validateWeights() {
     var errors = [];
     var vlmTotal = (+sliders.vq.value) + (+sliders.pa.value) + (+sliders.tr.value);
-    var detTotal = (+sliders.clip.value) + (+sliders.sharp.value) + (+sliders.nima.value) + (+sliders.time.value);
+    var detTotal = (+sliders.clip.value) + (+sliders.sharp.value) + (+sliders.nima.value) + (+sliders.arniqa.value) + (+sliders.topiq.value) + (+sliders.musiq.value) + (+sliders.time.value);
     if (Math.abs(vlmTotal - 100) > 1) errors.push("VLM Dimensions: " + sliders.vq.value + " + " + sliders.pa.value + " + " + sliders.tr.value + " = <strong>" + vlmTotal + "%</strong> (need 100%)");
-    if (Math.abs(detTotal - 100) > 1) errors.push("Deterministic Metrics: " + sliders.clip.value + " + " + sliders.sharp.value + " + " + sliders.nima.value + " + " + sliders.time.value + " = <strong>" + detTotal + "%</strong> (need 100%)");
+    if (Math.abs(detTotal - 100) > 1) errors.push("Deterministic Metrics total = <strong>" + detTotal + "%</strong> (need 100%)");
     return errors;
   }
 
@@ -1147,7 +1333,8 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     return {
       vlm: +sliders.vlm.value, det: +sliders.det.value,
       vq: +sliders.vq.value, pa: +sliders.pa.value, tr: +sliders.tr.value,
-      clip: +sliders.clip.value, sharp: +sliders.sharp.value, nima: +sliders.nima.value, time: +sliders.time.value
+      clip: +sliders.clip.value, sharp: +sliders.sharp.value, nima: +sliders.nima.value,
+      arniqa: +sliders.arniqa.value, topiq: +sliders.topiq.value, musiq: +sliders.musiq.value, time: +sliders.time.value
     };
   }
 
@@ -1188,6 +1375,9 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     }
     if (d.sharp > 0) { detVals.push(Math.min(1, d.sharp)); detSubW.push(w.sharp); detTotal += w.sharp; }
     if (d.nima !== null && d.nima > 0) { detVals.push(Math.min(1, d.nima)); detSubW.push(w.nima); detTotal += w.nima; }
+    if (d.arniqa !== null && d.arniqa > 0) { detVals.push(Math.min(1, d.arniqa)); detSubW.push(w.arniqa); detTotal += w.arniqa; }
+    if (d.topiq !== null && d.topiq > 0) { detVals.push(Math.min(1, d.topiq)); detSubW.push(w.topiq); detTotal += w.topiq; }
+    if (d.musiq !== null && d.musiq > 0) { detVals.push(Math.min(1, d.musiq)); detSubW.push(w.musiq); detTotal += w.musiq; }
     if (d.time > 0 && w.time > 0) {
       // Invert: faster = higher score. Normalize to 0-1 range.
       var timeNorm = TIME_MAX > TIME_MIN ? clamp(1 - (d.time - TIME_MIN) / (TIME_MAX - TIME_MIN), 0, 1) : 0.5;
@@ -1403,13 +1593,8 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     s.addEventListener("input", function() { onSliderInput(s); });
   });
 
-  // --- Apply button: validate then recompute ---
+  // --- Apply button: recompute (sub-weights are auto-normalized in calcOverall) ---
   document.getElementById("apply-btn").addEventListener("click", function() {
-    var errors = validateWeights();
-    if (errors.length > 0) {
-      showModal(errors);
-      return;
-    }
     recompute();
     // Close panel + update toggle text
     weightPanel.classList.remove("open");
@@ -1445,7 +1630,11 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   function updateURL(w) {
     var params = new URLSearchParams();
     params.set("wv", "1");
-    for (var k in w) params.set(k, w[k]);
+    var urlKeys = ["vlm","det","vq","pa","tr","clip","sharp","nima","topiq","time"];
+    for (var i = 0; i < urlKeys.length; i++) {
+      var k = urlKeys[i];
+      if (w[k] !== undefined) params.set(k, w[k]);
+    }
     history.replaceState(null, "", "?" + params.toString());
   }
 
@@ -1464,7 +1653,7 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
   }
 
   // --- Share ---
-  document.getElementById("share-btn").addEventListener("click", function() {
+  function copyUrl() {
     var url = location.href;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url);
@@ -1478,6 +1667,14 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     var toast = document.getElementById("toast");
     toast.classList.add("show");
     setTimeout(function() { toast.classList.remove("show"); }, 2000);
+  }
+  document.getElementById("share-btn").addEventListener("click", copyUrl);
+  document.getElementById("share-x-btn").addEventListener("click", function() {
+    var text = "{{ data.model_count }} AI image models benchmarked by 3 independent VLM judges — Evalytic Image Models Leaderboard";
+    window.open("https://x.com/intent/post?text=" + encodeURIComponent(text) + "&url=" + encodeURIComponent(location.href), "_blank");
+  });
+  document.getElementById("share-li-btn").addEventListener("click", function() {
+    window.open("https://www.linkedin.com/sharing/share-offsite/?url=" + encodeURIComponent(location.href), "_blank");
   });
 
   // --- Dark/light toggle ---
@@ -1606,10 +1803,18 @@ tr[data-rank="3"] td:first-child { border-left-color: var(--bronze); }
     lightbox.classList.add("open");
   }
 
+  var lbSpinner = document.getElementById("lb-spinner");
   function lbShowCurrent() {
     if (!lbImages.length) return;
     lbIdx = Math.max(0, Math.min(lbIdx, lbImages.length - 1));
     var item = lbImages[lbIdx];
+    // Show spinner + fade out while loading
+    lbImg.classList.add("loading");
+    if (lbSpinner) lbSpinner.classList.add("active");
+    lbImg.onload = function() {
+      lbImg.classList.remove("loading");
+      if (lbSpinner) lbSpinner.classList.remove("active");
+    };
     lbImg.src = item.src;
     if (lbModel) lbModel.textContent = item.model;
     if (lbPrompt) lbPrompt.textContent = lbCurrentPrompt;
@@ -1726,6 +1931,7 @@ def write_leaderboard(
     *,
     show_fal_links: bool = True,
     archive_versions: list[dict[str, Any]] | None = None,
+    cdn_base: str = "",
 ) -> str:
     """Generate a self-contained leaderboard HTML page from a BenchReport.
 
@@ -1741,6 +1947,7 @@ def write_leaderboard(
         archive_versions=archive_versions,
         show_fal_links=show_fal_links,
     )
+    data.cdn_base = cdn_base
 
     # Calculate default overall + Score/$, sort by overall desc
     entries_with_overall = []
@@ -1771,6 +1978,9 @@ def write_leaderboard(
             "clip": e.clip_score,
             "sharp": e.sharpness,
             "nima": e.nima_score,
+            "arniqa": e.arniqa_score,
+            "topiq": e.topiq_score,
+            "musiq": e.musiq_score,
             "cost": e.cost_per_image,
             "time": e.avg_time_s,
         })

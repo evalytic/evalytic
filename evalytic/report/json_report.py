@@ -11,9 +11,13 @@ if TYPE_CHECKING:
 
 def report_to_dict(report: BenchReport) -> dict[str, Any]:
     """Convert a BenchReport to the JSON schema dict."""
+    from .. import __version__ as evalytic_version
+
     d: dict[str, Any] = {
         "$schema": "https://evalytic.ai/schemas/bench-report-v1.json",
         "version": "1.0",
+        "evalytic_version": evalytic_version,
+        "eval_type": "bench",
         "name": report.name,
         "created_at": report.created_at,
         "duration_seconds": report.duration_seconds,

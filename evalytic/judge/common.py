@@ -35,6 +35,16 @@ def guess_mime(url: str) -> str:
     return "image/jpeg"
 
 
+def extract_response_cost(response: Any) -> float:
+    """Extract per-request cost from provider response metadata when available."""
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("X-Parel-Cost") or headers.get("x-parel-cost") or "0"
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def call_with_retries(
     call_fn: Any,
     *args: Any,

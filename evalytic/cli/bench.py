@@ -229,12 +229,14 @@ def _run_images_mode(
     if not metrics_list and not no_metrics:
         # Auto-detect based on pipeline
         try:
-            from ..bench.metrics import METRICS_AVAILABLE
+            from ..bench.metrics import METRICS_AVAILABLE, NIMA_AVAILABLE
             if METRICS_AVAILABLE:
                 if pipeline == "img2img":
                     metrics_list = ["lpips", "sharpness"]
                 else:
                     metrics_list = ["clip", "sharpness"]
+                if NIMA_AVAILABLE:
+                    metrics_list.append("nima")
             else:
                 metrics_list = ["sharpness"]
         except Exception:
@@ -242,17 +244,25 @@ def _run_images_mode(
     if no_metrics:
         metrics_list = []
     if metrics_list:
-        heavy = [m for m in metrics_list if m not in ("sharpness",)]
-        if heavy:
-            from ..bench.metrics import METRICS_AVAILABLE
-
-            if not METRICS_AVAILABLE:
-                console.print(
-                    "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
-                    "Heavy metrics will be skipped (sharpness still active).\n"
-                    "  Install with: pip install evalytic[metrics]\n"
-                )
-                metrics_list = [m for m in metrics_list if m == "sharpness"]
+        from ..bench.metrics import METRICS_AVAILABLE, NIMA_AVAILABLE
+        _PYIQA_METRICS = {"nima", "aesthetic", "arniqa", "topiq", "musiq"}
+        _TORCH_METRICS = {"clip", "lpips", "face"}
+        torch_needed = [m for m in metrics_list if m in _TORCH_METRICS]
+        pyiqa_needed = [m for m in metrics_list if m in _PYIQA_METRICS]
+        if torch_needed and not METRICS_AVAILABLE:
+            console.print(
+                "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
+                f"Skipping: {', '.join(torch_needed)}.\n"
+                "  Install with: pip install evalytic[metrics]\n"
+            )
+            metrics_list = [m for m in metrics_list if m not in _TORCH_METRICS]
+        if pyiqa_needed and not NIMA_AVAILABLE:
+            console.print(
+                "\n  [yellow]Warning:[/yellow] pyiqa not installed. "
+                f"Skipping: {', '.join(pyiqa_needed)}.\n"
+                "  Install with: pip install pyiqa\n"
+            )
+            metrics_list = [m for m in metrics_list if m not in _PYIQA_METRICS]
 
     # Build scoring config
     scoring_config = None
@@ -515,7 +525,7 @@ class GroupedBenchCommand(click.Command):
 @click.option("--yes", "-y", is_flag=True, help="Skip cost confirmation.")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress bars.")
 @click.option("--no-terminal", is_flag=True, help="Suppress Rich terminal output.")
-@click.option("--metrics", multiple=True, help="Local metrics to compute: clip, lpips. Auto-detected if evalytic[metrics] installed.")
+@click.option("--metrics", multiple=True, help="Local metrics: clip, sharpness, nima, arniqa, topiq, musiq, ocr, lpips, face. Auto-detected.")
 @click.option("--no-metrics", is_flag=True, help="Disable automatic metrics (CLIP/LPIPS).")
 @click.option("--review", is_flag=True, help="Open browser review after scoring.")
 @click.option("--review-port", default=3847, show_default=True, help="Port for review server.")
@@ -850,14 +860,15 @@ def bench(
         else:
             # Auto-detect based on pipeline
             try:
-                from ..bench.metrics import METRICS_AVAILABLE
+                from ..bench.metrics import METRICS_AVAILABLE, NIMA_AVAILABLE
                 if METRICS_AVAILABLE:
                     if pipeline == "img2img":
                         metrics_list = ["lpips", "sharpness"]
                     else:
-                        metrics_list = ["clip", "sharpness", "nima"]
+                        metrics_list = ["clip", "sharpness"]
+                    if NIMA_AVAILABLE:
+                        metrics_list.append("nima")
                 else:
-                    # Sharpness needs no torch — always available
                     metrics_list = ["sharpness"]
             except Exception:
                 metrics_list = ["sharpness"]
@@ -867,19 +878,25 @@ def bench(
     if no_metrics:
         metrics_list = []
     if metrics_list:
-        # Sharpness is always available (numpy+PIL only). Warn only if
-        # heavy metrics (clip/lpips/face) are requested without torch.
-        heavy = [m for m in metrics_list if m not in ("sharpness",)]
-        if heavy:
-            from ..bench.metrics import METRICS_AVAILABLE
-
-            if not METRICS_AVAILABLE:
-                console.print(
-                    "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
-                    "Heavy metrics will be skipped (sharpness still active).\n"
-                    "  Install with: pip install evalytic[metrics]\n"
-                )
-                metrics_list = [m for m in metrics_list if m == "sharpness"]
+        from ..bench.metrics import METRICS_AVAILABLE, NIMA_AVAILABLE
+        _PYIQA_METRICS = {"nima", "aesthetic", "arniqa", "topiq", "musiq"}
+        _TORCH_METRICS = {"clip", "lpips", "face"}
+        torch_needed = [m for m in metrics_list if m in _TORCH_METRICS]
+        pyiqa_needed = [m for m in metrics_list if m in _PYIQA_METRICS]
+        if torch_needed and not METRICS_AVAILABLE:
+            console.print(
+                "\n  [yellow]Warning:[/yellow] evalytic[metrics] not installed. "
+                f"Skipping: {', '.join(torch_needed)}.\n"
+                "  Install with: pip install evalytic[metrics]\n"
+            )
+            metrics_list = [m for m in metrics_list if m not in _TORCH_METRICS]
+        if pyiqa_needed and not NIMA_AVAILABLE:
+            console.print(
+                "\n  [yellow]Warning:[/yellow] pyiqa not installed. "
+                f"Skipping: {', '.join(pyiqa_needed)}.\n"
+                "  Install with: pip install pyiqa\n"
+            )
+            metrics_list = [m for m in metrics_list if m not in _PYIQA_METRICS]
 
     # Cost estimate
     cost_est = estimate_run_cost(

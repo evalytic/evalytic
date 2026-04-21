@@ -124,8 +124,10 @@ class TestConsensusDegraded:
         assert "judge-b" in results[0].judge_scores
         assert "judge-a" not in results[0].judge_scores
 
-    def test_both_fail_returns_zero(self) -> None:
-        """Both judges fail → score 0, agreement='degraded'."""
+    def test_both_fail_raises_judge_error(self) -> None:
+        """Both judges fail → JudgeError raised (not silent zero)."""
+        from evalytic.exceptions import JudgeError
+
         with patch("evalytic.bench.consensus.Judge") as MockJudge:
             instances = [MagicMock(), MagicMock()]
             instances[0].score.side_effect = Exception("API error")
@@ -133,16 +135,12 @@ class TestConsensusDegraded:
             MockJudge.side_effect = instances
 
             cj = ConsensusJudge(["judge-a", "judge-b"])
-            results = cj.score(
-                image_url="https://example.com/img.png",
-                dimensions=["visual_quality"],
-            )
+            with pytest.raises(JudgeError, match="All judges failed"):
+                cj.score(
+                    image_url="https://example.com/img.png",
+                    dimensions=["visual_quality"],
+                )
             cj.close()
-
-        assert len(results) == 1
-        assert results[0].score == 0.0
-        assert results[0].confidence == 0.0
-        assert results[0].agreement == "degraded"
 
 
 class TestConsensusValidation:

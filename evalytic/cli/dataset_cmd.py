@@ -14,13 +14,49 @@ from rich.table import Table
 
 console = Console()
 
+DATASET_TYPES = ["text2img", "img2img", "rag", "text", "agent"]
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
+def _detect_dataset_type(data: Any) -> str:
+    """Detect the canonical dataset type."""
+    if isinstance(data, dict):
+        if data.get("type"):
+            return str(data["type"])
+        if data.get("pipeline"):
+            return str(data["pipeline"])
+        if "inputs" in data:
+            return "img2img"
+        if "prompts" in data:
+            return "text2img"
+        items = data.get("items")
+        sample = items[0] if isinstance(items, list) and items else data
+    elif isinstance(data, list) and data:
+        sample = data[0]
+    else:
+        return "text2img"
+
+    if isinstance(sample, dict):
+        if "query" in sample and "response" in sample:
+            return "rag"
+        if "input" in sample and "final_output" in sample:
+            return "agent"
+        if "input" in sample and "output" in sample:
+            return "text"
+        if "image_url" in sample:
+            return "img2img"
+        if "prompt" in sample:
+            return "text2img"
+    if isinstance(sample, str):
+        return "text2img"
+    return "text2img"
+
+
 def _normalize_dataset(data: Any) -> dict[str, Any]:
-    """Normalize all supported formats into ``{"items": [...]}``.
+    """Normalize all supported formats into ``{"type": "...", "items": [...]}``.
 
     Accepted inputs:
     - Plain list of strings: ``["prompt1", "prompt2"]``
@@ -34,14 +70,19 @@ def _normalize_dataset(data: Any) -> dict[str, Any]:
             {"prompt": item} if isinstance(item, str) else item
             for item in data
         ]
-        return {"items": items}
+        return {"type": _detect_dataset_type(items), "items": items}
 
     if not isinstance(data, dict):
-        return {"items": []}
+        return {"type": "text2img", "items": []}
 
     # Already canonical
     if "items" in data:
-        return data
+        result = dict(data)
+        dataset_type = _detect_dataset_type(result)
+        result.setdefault("type", dataset_type)
+        if dataset_type in ("text2img", "img2img"):
+            result.setdefault("pipeline", dataset_type)
+        return result
 
     result = {k: v for k, v in data.items() if k not in ("prompts", "inputs")}
 
@@ -51,12 +92,15 @@ def _normalize_dataset(data: Any) -> dict[str, Any]:
             {"prompt": item} if isinstance(item, str) else item
             for item in items
         ]
+        result.setdefault("type", "text2img")
         result.setdefault("pipeline", "text2img")
     elif "inputs" in data:
         result["items"] = data["inputs"]
+        result.setdefault("type", "img2img")
         result.setdefault("pipeline", "img2img")
     else:
         result["items"] = []
+        result.setdefault("type", _detect_dataset_type(result))
 
     return result
 
@@ -80,28 +124,55 @@ def _validate_dataset(data: dict[str, Any]) -> list[str]:
     """Validate a normalized dataset, returning a list of warnings."""
     warnings: list[str] = []
     items = data.get("items", [])
-    pipeline = data.get("pipeline", "")
+    dataset_type = data.get("type") or data.get("pipeline") or _detect_dataset_type(data)
 
     if not items:
         warnings.append("Dataset has no items.")
 
     for i, item in enumerate(items):
-        # Check pipeline consistency
-        has_image = "image_url" in item
-        has_prompt = "prompt" in item
+        if not isinstance(item, dict):
+            warnings.append(f"Item {i}: must be an object.")
+            continue
 
-        if pipeline == "text2img" and has_image and not has_prompt:
-            warnings.append(f"Item {i}: has image_url but pipeline is text2img.")
-        if pipeline == "img2img" and not has_image:
-            warnings.append(f"Item {i}: missing image_url for img2img pipeline.")
+        if dataset_type == "text2img":
+            has_image = "image_url" in item
+            has_prompt = "prompt" in item
+            if has_image and not has_prompt:
+                warnings.append(f"Item {i}: has image_url but type is text2img.")
+            if not has_prompt:
+                warnings.append(f"Item {i}: missing prompt for text2img dataset.")
+        elif dataset_type == "img2img":
+            if "image_url" not in item:
+                warnings.append(f"Item {i}: missing image_url for img2img dataset.")
+        elif dataset_type == "rag":
+            if "query" not in item:
+                warnings.append(f"Item {i}: missing query for rag dataset.")
+            if "response" not in item:
+                warnings.append(f"Item {i}: missing response for rag dataset.")
+            if not item.get("contexts"):
+                warnings.append(f"Item {i}: missing contexts for rag dataset.")
+        elif dataset_type == "text":
+            if "input" not in item:
+                warnings.append(f"Item {i}: missing input for text dataset.")
+            if "output" not in item:
+                warnings.append(f"Item {i}: missing output for text dataset.")
+        elif dataset_type == "agent":
+            if "input" not in item:
+                warnings.append(f"Item {i}: missing input for agent dataset.")
+            if "final_output" not in item:
+                warnings.append(f"Item {i}: missing final_output for agent dataset.")
 
-        # Validate expected scores
-        expected = item.get("expected", {})
-        for dim, score in expected.items():
-            if not isinstance(score, (int, float)):
-                warnings.append(f"Item {i}: expected[{dim}] is not a number.")
-            elif score < 0 or score > 5:
-                warnings.append(f"Item {i}: expected[{dim}]={score} is outside 0-5 range.")
+        # Validate expected scores where expected is numeric map
+        expected = item.get("expected")
+        if isinstance(expected, dict):
+            score_max = 5.0 if dataset_type in ("text2img", "img2img") else 1.0
+            for dim, score in expected.items():
+                if not isinstance(score, (int, float)):
+                    warnings.append(f"Item {i}: expected[{dim}] is not a number.")
+                elif score < 0 or score > score_max:
+                    warnings.append(
+                        f"Item {i}: expected[{dim}]={score} is outside 0-{int(score_max) if score_max.is_integer() else score_max} range."
+                    )
 
     return warnings
 
@@ -136,6 +207,30 @@ def _detect_raw_format(path: str) -> str | None:
     return None
 
 
+def _item_label(dataset_type: str) -> str:
+    return {
+        "text2img": "prompts",
+        "img2img": "images",
+        "rag": "queries",
+        "text": "cases",
+        "agent": "runs",
+    }.get(dataset_type, "items")
+
+
+def _truncate(value: Any, max_len: int = 60) -> str:
+    text = str(value or "")
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def _expected_cell(expected: Any) -> str:
+    if isinstance(expected, dict):
+        parts = [f"{k}:{v}" for k, v in expected.items()]
+        return ", ".join(parts)
+    if expected is None:
+        return ""
+    return _truncate(expected, 50)
+
+
 # ---------------------------------------------------------------------------
 # Command group
 # ---------------------------------------------------------------------------
@@ -154,28 +249,45 @@ def dataset_group() -> None:
 @dataset_group.command("create")
 @click.option("--name", "-n", required=True, help="Dataset name.")
 @click.option(
-    "--pipeline",
+    "--type", "dataset_type",
+    type=click.Choice(DATASET_TYPES),
+    default=None,
+    help="Canonical dataset type.",
+)
+@click.option(
+    "--pipeline", "legacy_pipeline",
     type=click.Choice(["text2img", "img2img"]),
-    default="text2img",
-    show_default=True,
-    help="Pipeline type.",
+    default=None,
+    help="Legacy alias for visual dataset types.",
 )
 @click.option("--description", "-d", default="", help="Dataset description.")
 @click.option("--output", "-o", default=None, help="Output file path (default: <name>.json).")
-def dataset_create(name: str, pipeline: str, description: str, output: str | None) -> None:
+def dataset_create(
+    name: str,
+    dataset_type: str | None,
+    legacy_pipeline: str | None,
+    description: str,
+    output: str | None,
+) -> None:
     """Create a new empty dataset file."""
     out_path = output or f"{name}.json"
     if Path(out_path).exists():
         console.print(f"[bold red]Error:[/bold red] File already exists: {out_path}\n")
         sys.exit(2)
+    if dataset_type and legacy_pipeline and dataset_type != legacy_pipeline:
+        console.print("[bold red]Error:[/bold red] --type and --pipeline disagree.\n")
+        sys.exit(2)
+    resolved_type = dataset_type or legacy_pipeline or "text2img"
 
     data: dict[str, Any] = {
         "name": name,
         "description": description,
-        "pipeline": pipeline,
+        "type": resolved_type,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "items": [],
     }
+    if resolved_type in ("text2img", "img2img"):
+        data["pipeline"] = resolved_type
     _write_dataset(data, out_path)
     console.print(f"  Created dataset: [bold]{out_path}[/bold]\n")
 
@@ -191,17 +303,10 @@ def dataset_show(path: str) -> None:
     """Show dataset contents as a table."""
     data = _load_dataset(path)
     items = data.get("items", [])
-    pipeline = data.get("pipeline", "")
+    dataset_type = data.get("type") or data.get("pipeline") or _detect_dataset_type(data)
     ds_name = data.get("name", Path(path).stem)
 
-    # Auto-detect pipeline
-    if not pipeline:
-        if any("image_url" in item for item in items):
-            pipeline = "img2img"
-        else:
-            pipeline = "text2img"
-
-    console.print(f"\n  [bold]{ds_name}[/bold]  |  {pipeline}  |  {len(items)} items\n")
+    console.print(f"\n  [bold]{ds_name}[/bold]  |  {dataset_type}  |  {len(items)} items\n")
 
     if not items:
         console.print("  (empty dataset)\n")
@@ -210,35 +315,56 @@ def dataset_show(path: str) -> None:
     table = Table(show_lines=False, pad_edge=True)
     table.add_column("#", style="dim", justify="right")
 
-    if pipeline == "img2img":
+    if dataset_type == "img2img":
         table.add_column("Image URL", max_width=40)
         table.add_column("Instruction", max_width=40)
+    elif dataset_type == "rag":
+        table.add_column("Query", max_width=36)
+        table.add_column("Response", max_width=36)
+        table.add_column("Contexts", justify="right")
+    elif dataset_type == "text":
+        table.add_column("Input", max_width=36)
+        table.add_column("Output", max_width=36)
+        table.add_column("Expected", max_width=24)
+    elif dataset_type == "agent":
+        table.add_column("Input", max_width=32)
+        table.add_column("Final Output", max_width=32)
+        table.add_column("Tools", justify="right")
     else:
         table.add_column("Prompt", max_width=60)
 
     table.add_column("Metadata", style="dim")
-    table.add_column("Expected", style="cyan")
+    if dataset_type not in ("text",):
+        table.add_column("Expected", style="cyan")
 
     for i, item in enumerate(items):
         row: list[str] = [str(i + 1)]
-        if pipeline == "img2img":
+        if dataset_type == "img2img":
             img_url = item.get("image_url", "")
             if len(img_url) > 40:
                 img_url = img_url[:37] + "..."
             row.append(img_url)
             row.append(item.get("instruction", item.get("prompt", "")))
+        elif dataset_type == "rag":
+            row.append(_truncate(item.get("query", ""), 36))
+            row.append(_truncate(item.get("response", ""), 36))
+            row.append(str(len(item.get("contexts", []) or [])))
+        elif dataset_type == "text":
+            row.append(_truncate(item.get("input", ""), 36))
+            row.append(_truncate(item.get("output", ""), 36))
+            row.append(_expected_cell(item.get("expected")))
+        elif dataset_type == "agent":
+            row.append(_truncate(item.get("input", ""), 32))
+            row.append(_truncate(item.get("final_output", ""), 32))
+            row.append(str(len(item.get("tool_calls", []) or [])))
         else:
             row.append(item.get("prompt", ""))
 
         meta = item.get("metadata", {})
         row.append(", ".join(f"{k}={v}" for k, v in meta.items()) if meta else "")
 
-        expected = item.get("expected", {})
-        if expected:
-            parts = [f"{k}:{v}" for k, v in expected.items()]
-            row.append(", ".join(parts))
-        else:
-            row.append("")
+        if dataset_type not in ("text",):
+            row.append(_expected_cell(item.get("expected")))
 
         table.add_row(*row)
 
@@ -377,6 +503,9 @@ def dataset_from_bench(
     if not report_items:
         console.print("[bold red]Error:[/bold red] Report has no items.\n")
         sys.exit(2)
+    if report.get("eval_type", "bench") != "bench":
+        console.print("[bold red]Error:[/bold red] dataset from-bench only supports bench reports.\n")
+        sys.exit(2)
 
     # Determine pipeline from report config
     pipeline = report.get("config", {}).get("pipeline", "")
@@ -448,11 +577,13 @@ def dataset_from_bench(
     dataset: dict[str, Any] = {
         "name": ds_name,
         "description": f"Generated from bench report: {p.name}",
-        "pipeline": pipeline,
+        "type": pipeline,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_report": report_path,
         "items": ds_items,
     }
+    if pipeline in ("text2img", "img2img"):
+        dataset["pipeline"] = pipeline
 
     _write_dataset(dataset, output)
     console.print(f"  Created dataset with {len(ds_items)} items: [bold]{output}[/bold]")
@@ -493,20 +624,31 @@ def dataset_stats(path: str) -> None:
     data = _load_dataset(path)
     items = data.get("items", [])
     ds_name = data.get("name", Path(path).stem)
-    pipeline = data.get("pipeline", "unknown")
+    dataset_type = data.get("type") or data.get("pipeline") or _detect_dataset_type(data)
 
-    console.print(f"\n  [bold]{ds_name}[/bold]  |  {pipeline}")
+    console.print(f"\n  [bold]{ds_name}[/bold]  |  {dataset_type}")
     console.print(f"  Items: {len(items)}")
 
-    # Count items with expected scores
-    items_with_expected = [item for item in items if item.get("expected")]
+    items_with_expected = [item for item in items if item.get("expected") is not None]
     console.print(f"  Items with expected scores: {len(items_with_expected)}")
+
+    if dataset_type == "rag":
+        context_counts = [len(item.get("contexts", []) or []) for item in items if isinstance(item, dict)]
+        if context_counts:
+            console.print(f"  Avg contexts per item: {sum(context_counts) / len(context_counts):.1f}")
+    elif dataset_type == "agent":
+        tool_counts = [len(item.get("tool_calls", []) or []) for item in items if isinstance(item, dict)]
+        if tool_counts:
+            console.print(f"  Avg tool calls per run: {sum(tool_counts) / len(tool_counts):.1f}")
 
     # Expected score statistics
     if items_with_expected:
         dim_scores: dict[str, list[float]] = {}
         for item in items_with_expected:
-            for dim, score in item.get("expected", {}).items():
+            expected = item.get("expected")
+            if not isinstance(expected, dict):
+                continue
+            for dim, score in expected.items():
                 if isinstance(score, (int, float)):
                     dim_scores.setdefault(dim, []).append(score)
 
