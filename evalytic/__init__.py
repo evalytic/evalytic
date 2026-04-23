@@ -23,7 +23,7 @@ Python API:
     print(result.display_score)  # "3.8/5"
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 from .agent import AgentTestCase, AgentToolCall, evaluate_agent
 from .client import _get_client, init

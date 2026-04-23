@@ -20,7 +20,7 @@ evaly rag eval \
   --query "What is Evalytic?" \
   --response "Evalytic evaluates AI outputs." \
   --context "Evalytic is an evaluation platform." \
-  --metrics faithfulness,answer_relevancy
+  --metrics faithfulness,answer_relevancy,contextual_relevancy,hallucination
 
 # Text: evaluate LLM outputs
 evaly text eval \
@@ -38,7 +38,7 @@ evaly agent eval \
 Evalytic scores AI outputs across four eval domains with the same consensus-judge architecture:
 
 - **Visual** (images, video) — 7 semantic dimensions scored by VLM judges + deterministic metrics (sharpness, CLIP, LPIPS, ArcFace, NIMA, TOPIQ)
-- **RAG** — reference-free `faithfulness` + `answer_relevancy`; reference-based `context_precision` + `context_recall`
+- **RAG** — reference-free `faithfulness`, `answer_relevancy`, `contextual_relevancy`, `hallucination`; reference-based `context_precision` + `context_recall`
 - **Text** — `factual_correctness`, `semantic_similarity`, `g_eval` (custom rubric), BLEU, ROUGE, exact_match, levenshtein, string_presence
 - **Agent** — `tool_call_accuracy`, `goal_accuracy`, `step_efficiency`
 
@@ -140,6 +140,29 @@ evaly bench -m flux-schnell -p "A cat" \
 ```
 
 Two judges score in parallel. If they disagree, a third breaks the tie.
+
+## Pytest Integration
+
+Turn any metric into a pytest assertion. Fails the test when any score falls below its threshold, and reports every failing metric at once.
+
+```python
+from evalytic.testing import assert_test
+from evalytic.text.types import RAGTestCase, RetrievedChunk
+
+def test_rag_quality():
+    case = RAGTestCase(
+        query="What is Evalytic?",
+        response="Evalytic evaluates AI outputs.",
+        contexts=[RetrievedChunk(text="Evalytic is an evaluation SDK for AI outputs.")],
+    )
+    assert_test(case, metrics={
+        "faithfulness": 0.8,
+        "hallucination": 0.9,
+        "contextual_relevancy": 0.75,
+    })
+```
+
+Same helper works for `TextTestCase` and `AgentTestCase`. No plugin install required. For single-metric assertions use `assert_metric(case, "hallucination", threshold=0.95)`.
 
 ## Optional Extras
 

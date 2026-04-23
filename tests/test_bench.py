@@ -1329,7 +1329,7 @@ class TestPublicApi:
         import evalytic
 
         assert callable(evalytic.bench)
-        assert evalytic.__version__ == "0.4.1"
+        assert evalytic.__version__ == "0.5.0"
 
 
 # -----------------------------------------------------------------------

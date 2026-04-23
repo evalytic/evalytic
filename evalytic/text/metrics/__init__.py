@@ -4,9 +4,11 @@ from .answer_relevancy import AnswerRelevancyMetric
 from .base import BaseTextMetric
 from .context_precision import ContextPrecisionMetric
 from .context_recall import ContextRecallMetric
+from .contextual_relevancy import ContextualRelevancyMetric
 from .factual_correctness import FactualCorrectnessMetric
 from .faithfulness import FaithfulnessMetric
 from .g_eval import GEvalMetric
+from .hallucination import HallucinationMetric
 from .semantic_similarity import SemanticSimilarityMetric
 from .statistical import (
     BleuMetric,
@@ -21,6 +23,8 @@ METRIC_REGISTRY = {
     "answer_relevancy": AnswerRelevancyMetric,
     "context_precision": ContextPrecisionMetric,
     "context_recall": ContextRecallMetric,
+    "contextual_relevancy": ContextualRelevancyMetric,
+    "hallucination": HallucinationMetric,
     "factual_correctness": FactualCorrectnessMetric,
     "semantic_similarity": SemanticSimilarityMetric,
     "g_eval": GEvalMetric,
@@ -36,9 +40,11 @@ __all__ = [
     "AnswerRelevancyMetric",
     "ContextPrecisionMetric",
     "ContextRecallMetric",
+    "ContextualRelevancyMetric",
     "FactualCorrectnessMetric",
     "FaithfulnessMetric",
     "GEvalMetric",
+    "HallucinationMetric",
     "SemanticSimilarityMetric",
     "BleuMetric",
     "RougeMetric",

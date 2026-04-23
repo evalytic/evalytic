@@ -31,7 +31,7 @@ from evalytic.dataset import Dataset
 
 
 def test_version_is_set() -> None:
-    assert evalytic.__version__ == "0.4.1"
+    assert evalytic.__version__ == "0.5.0"
 
 
 # -----------------------------------------------------------------------
